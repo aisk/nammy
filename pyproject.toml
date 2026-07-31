@@ -8,3 +8,17 @@ dependencies = [
     "numpy>=2.5.1",
     "tinygrad>=0.13.0",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "pydantic>=2.13.4",
+    "torch>=2.13.0",
+]

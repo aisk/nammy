@@ -1,0 +1,23 @@
+version = 1
+revision = 3
+requires-python = ">=3.13"
+
+[[package]]
+name = "nammy"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "tinygrad" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "tinygrad", specifier = ">=0.13.0" }]
+
+[[package]]
+name = "tinygrad"
+version = "0.13.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/30/069aef268ec5100d6d1dcc97dd1ac4793ff25e85ab71397aa9eef039f8c5/tinygrad-0.13.0.tar.gz", hash = "sha256:c12c428edaaa5c1915ff76f4fc6f6ded9b82f19bea6ab6bcc469bb7dfe6fcf4a", size = 2440369, upload-time = "2026-05-22T20:13:40.219Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/df/11/9ed320292a5fbfd8a2160b9a8f585e1a2f92a67cf34061c6104f5b2b0114/tinygrad-0.13.0-py3-none-any.whl", hash = "sha256:1aad37a742ac5f0bd26d811b9b799fbb08088eaa2e7279ff53b19b8c934a9f1c", size = 2529246, upload-time = "2026-05-22T20:13:38.222Z" },
+]

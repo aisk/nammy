@@ -2,29 +2,18 @@
 nammy: a tinygrad-based trainer for NAM's classic ("A1") WaveNet architecture.
 
 Usage:
-    uv run main.py input.wav output.wav [--epochs N] [--ny N] [--batch-size N]
-                   [--latency SAMPLES] [--out model.nam]
+    uv run main.py train input.wav output.wav [--epochs N] [--out model.nam] ...
+    uv run main.py process model.nam input.wav output.wav
 """
 
 import argparse
 
-from nammy.data import load_pair
+from nammy.data import load_pair, read_wav, write_wav
 from nammy.train import train
 from nammy.wavenet import WaveNet
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Train a NAM WaveNet (A1) with tinygrad")
-    parser.add_argument("input", help="Input (DI/reamp source) WAV")
-    parser.add_argument("output", help="Output (amp-processed) WAV")
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--ny", type=int, default=8192)
-    parser.add_argument("--lr", type=float, default=0.004)
-    parser.add_argument("--latency", type=int, default=0, help="Output latency in samples")
-    parser.add_argument("--out", default="model.nam", help="Path for the exported .nam")
-    args = parser.parse_args()
-
+def cmd_train(args):
     x, y, sample_rate = load_pair(args.input, args.output, latency=args.latency)
     print(f"loaded {len(x)} samples @ {sample_rate} Hz")
 
@@ -40,6 +29,42 @@ def main():
     )
     model.export_nam(args.out, sample_rate=float(sample_rate))
     print(f"exported {args.out}")
+
+
+def cmd_process(args):
+    model, model_rate = WaveNet.from_nam(args.model)
+    x, rate = read_wav(args.input)
+    if model_rate is not None and rate != model_rate:
+        print(f"warning: model was trained at {model_rate} Hz, input is {rate} Hz")
+    print(f"processing {len(x)} samples @ {rate} Hz")
+    y = model.process(x)
+    write_wav(args.output, y, rate)
+    print(f"wrote {args.output}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="NAM WaveNet (A1) trainer on tinygrad")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_train = sub.add_parser("train", help="Train a model from an input/output WAV pair")
+    p_train.add_argument("input", help="Input (DI/reamp source) WAV")
+    p_train.add_argument("output", help="Output (amp-processed) WAV")
+    p_train.add_argument("--epochs", type=int, default=100)
+    p_train.add_argument("--batch-size", type=int, default=16)
+    p_train.add_argument("--ny", type=int, default=8192)
+    p_train.add_argument("--lr", type=float, default=0.004)
+    p_train.add_argument("--latency", type=int, default=0, help="Output latency in samples")
+    p_train.add_argument("--out", default="model.nam", help="Path for the exported .nam")
+    p_train.set_defaults(func=cmd_train)
+
+    p_proc = sub.add_parser("process", help="Run a WAV through a .nam model (reamp)")
+    p_proc.add_argument("model", help="Path to a WaveNet .nam file")
+    p_proc.add_argument("input", help="Input WAV to process")
+    p_proc.add_argument("output", help="Where to write the processed WAV (24-bit PCM)")
+    p_proc.set_defaults(func=cmd_process)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":

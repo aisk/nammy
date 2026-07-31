@@ -79,6 +79,23 @@ def _read_wav_riff(path: str) -> tuple[np.ndarray, int]:
     raise ValueError(f"Unsupported WAV format {audio_format}")
 
 
+def write_wav(path: str, x: np.ndarray, rate: int, sampwidth: int = 3) -> None:
+    """Write mono float samples in [-1, 1] as PCM (16- or 24-bit, like NAM's default)."""
+    x = np.clip(x, -1.0, 1.0)
+    if sampwidth == 2:
+        frames = (x * (2**15 - 1)).astype("<i2").tobytes()
+    elif sampwidth == 3:
+        i32 = (x * (2**23 - 1)).astype("<i4")
+        frames = i32.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+    else:
+        raise ValueError(f"Unsupported sample width: {sampwidth}")
+    with wave.open(path, "wb") as fp:
+        fp.setnchannels(1)
+        fp.setsampwidth(sampwidth)
+        fp.setframerate(rate)
+        fp.writeframes(frames)
+
+
 class Dataset:
     """
     Slices aligned (x, y) into training pairs like nam.data.Dataset:

@@ -155,6 +155,38 @@ def _conv_import(conv, weights: np.ndarray, i: int) -> int:
 
 
 class WaveNet:
+    @classmethod
+    def from_nam(cls, path: str) -> tuple["WaveNet", Optional[float]]:
+        """Load a classic-schema WaveNet .nam file; returns (model, sample_rate)."""
+        with open(path) as fp:
+            d = json.load(fp)
+        if d.get("architecture") != "WaveNet":
+            raise ValueError(f"Unsupported architecture: {d.get('architecture')!r}")
+        cfg = d["config"]
+        if cfg.get("head") is not None:
+            raise NotImplementedError("WaveNet with a head module is not supported")
+        layers_configs = []
+        for lc in cfg["layers"]:
+            if lc.get("activation") != "Tanh" or lc.get("gated"):
+                raise NotImplementedError(
+                    f"Only Tanh/non-gated layers supported, got {lc.get('activation')!r}"
+                    f"{' gated' if lc.get('gated') else ''}"
+                )
+            layers_configs.append(
+                {
+                    "input_size": lc["input_size"],
+                    "condition_size": lc["condition_size"],
+                    "channels": lc["channels"],
+                    "head_size": lc["head_size"],
+                    "kernel_size": lc["kernel_size"],
+                    "dilations": list(lc["dilations"]),
+                    "head_bias": lc["head_bias"],
+                }
+            )
+        model = cls({"layers_configs": layers_configs, "head_scale": cfg["head_scale"]})
+        model.import_weights(np.asarray(d["weights"], dtype=np.float64))
+        return model, d.get("sample_rate")
+
     def __init__(self, config: Optional[dict] = None):
         config = config if config is not None else a1_config()
         self.layer_arrays = [_LayerArray(**lc) for lc in config["layers_configs"]]

@@ -80,8 +80,7 @@ constraint either: activations only amount to a few hundred MB.
 
 ## Notes
 
-- Runs on tinygrad's default device. Without a GPU and without `clang`
-  installed, it falls back to the libLLVM CPU renderer automatically.
+- Runs on tinygrad's default device.
 - Validation: `uv run tests/test_poc.py` checks receptive field, forward
   parity against an independent numpy implementation, `.nam` export
   round-trip, dataset alignment, and a training smoke test.

@@ -43,6 +43,41 @@ $ uv run python -m nammy process model.nam input.wav output.wav
 This also loads classic-schema (non-gated Tanh WaveNet) `.nam` files trained
 elsewhere.
 
+## Example training run
+
+Reference numbers from a run on consumer hardware, training on the Blackstar
+HT-1 capture pair from [Alec Wright's dataset](https://github.com/Alec-Wright/Automated-GuitarAmpModelling)
+(340 s of aligned input/target at 44.1 kHz):
+
+- **Hardware**: AMD Radeon RX 6800 on Windows 11, via tinygrad's OpenCL (`CL`)
+  backend.
+- **Config**: defaults — 100 epochs, batch 16, `ny` 8192, Adam(lr=0.004).
+- **Speed**: 88 s for the first epoch (dominated by JIT compilation), then a
+  steady ~26 s per epoch; ~44 min total.
+- **Result**: best validation ESR **0.0065**, reached at epoch 96. For
+  reference, ESR below 0.01 is a good model and 0.02–0.05 is usable.
+
+Convergence is fast: ESR hits 0.042 by epoch 3 and 0.0094 by epoch 40, then
+flattens, with the last 20 epochs improving it by under 2% while the training
+loss keeps falling. Epoch-to-epoch validation noise (±40%, with occasional
+early spikes to 0.02–0.04) is larger than those late-stage gains, so which
+epoch wins the best-checkpoint pick is partly luck. For this data and
+architecture, 60–80 epochs would have been enough.
+
+### On GPU choice
+
+The bottleneck is not raw compute. The A1 network is narrow (16 and 8
+channels) but 20 layers deep, so every layer is a small kernel that cannot
+fill a modern GPU, and the layers are serially dependent. The run above
+sustains on the order of 65 GFLOPS against the RX 6800's ~16 TFLOPS FP32
+peak, well under 1% utilization, with the wall clock going to kernel launches
+and memory round-trips rather than arithmetic.
+
+This suggests, though it has not been measured, that a considerably weaker
+discrete GPU would train at a broadly similar speed, with memory bandwidth
+rather than FLOPS being the main differentiator. Memory capacity is not a
+constraint either: activations only amount to a few hundred MB.
+
 ## Notes
 
 - Runs on tinygrad's default device. Without a GPU and without `clang`

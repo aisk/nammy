@@ -27,7 +27,7 @@ splits/checks.
 Train from an input/output pair:
 
 ```console
-$ uv run main.py train input.wav output.wav --epochs 100 --out model.nam
+$ uv run python -m nammy train input.wav output.wav --epochs 100 --out model.nam
 ```
 
 `input.wav` is the DI/reamp source, `output.wav` the processed capture; both
@@ -37,7 +37,7 @@ compensate reamp latency).
 Run audio through a trained model (reamp):
 
 ```console
-$ uv run main.py process model.nam input.wav output.wav
+$ uv run python -m nammy process model.nam input.wav output.wav
 ```
 
 This also loads classic-schema (non-gated Tanh WaveNet) `.nam` files trained

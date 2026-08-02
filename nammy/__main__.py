@@ -2,8 +2,8 @@
 nammy: a tinygrad-based trainer for NAM's classic ("A1") WaveNet architecture.
 
 Usage:
-    uv run main.py train input.wav output.wav [--epochs N] [--out model.nam] ...
-    uv run main.py process model.nam input.wav output.wav
+    uv run python -m nammy train input.wav output.wav [--epochs N] [--out model.nam] ...
+    uv run python -m nammy process model.nam input.wav output.wav
 """
 
 import argparse

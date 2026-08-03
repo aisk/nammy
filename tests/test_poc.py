@@ -6,6 +6,7 @@ POC validation:
 4. training smoke test on synthetic tanh-distortion data
 """
 
+import os
 import sys
 
 import numpy as np
@@ -89,8 +90,9 @@ def test_numpy_parity():
     print(f"PASS numpy parity: max abs err {err:.2e} over {len(want)} samples")
 
 
-def test_export_roundtrip(tmp_path="/tmp"):
+def test_export_roundtrip(tmp_path=None):
     import json
+    import tempfile
 
     model = WaveNet()
     weights = model.export_weights()
@@ -121,7 +123,7 @@ def test_export_roundtrip(tmp_path="/tmp"):
     # for its rounding: 0.02 -> 0.019999999552965164.
     assert np.allclose(a, b, atol=1e-6), "round-trip changed outputs"
 
-    path = "/tmp/claude-1000/-home-asaka-nammy/e3c2fd2f-0653-4c11-b0ed-59a30a0ba368/scratchpad/roundtrip.nam"
+    path = os.path.join(tmp_path or tempfile.gettempdir(), "roundtrip.nam")
     model.export_nam(path)
     with open(path) as fp:
         d = json.load(fp)

@@ -84,7 +84,8 @@ another backend:
   low-occupancy kernels: two of them alone cost 73 of the 188 ms step, running
   at 3–11 GFLOPS. `nammy/__init__.py` lowers `REDUCEOP_SPLIT_THRESHOLD` to 8192
   before tinygrad is imported, which takes the step to 63 ms; set it in the
-  environment to override.
+  environment to override. A CPU has no occupancy to win back and measures a few
+  percent slower, so this is skipped when `DEV` names a CPU device.
 - Validation ran one 65536-sample chunk at a time at batch 1, rebuilding the
   graph in Python for each. Chunks are independent, so `WaveNet.process` stacks
   them on the batch axis under a JIT: 5.3 s → 0.1 s per epoch.

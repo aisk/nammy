@@ -15,7 +15,7 @@ instead of PyTorch.
   `nam.data.Dataset`.
 - Training matching NAM's standard learning config: Adam(lr=0.004),
   per-epoch exponential LR decay (gamma 0.993), MSE loss, ESR validation with
-  best-checkpoint restore, JIT-compiled train step.
+  best-checkpoint restore, JIT-compiled train step and batched JIT inference.
 - Export to `.nam` (classic v0.5.4 schema) loadable by the NAM plugin.
 
 Not implemented (yet): A2/packed training, gated/FiLM variants, MRSTFT loss,
@@ -52,35 +52,50 @@ HT-1 capture pair from [Alec Wright's dataset](https://github.com/Alec-Wright/Au
 - **Hardware**: AMD Radeon RX 6800 on Windows 11, via tinygrad's OpenCL (`CL`)
   backend.
 - **Config**: defaults — 100 epochs, batch 16, `ny` 8192, Adam(lr=0.004).
-- **Speed**: 88 s for the first epoch (dominated by JIT compilation), then a
-  steady ~26 s per epoch; ~44 min total.
-- **Result**: best validation ESR **0.0065**, reached at epoch 96. For
+- **Speed**: 61 s for the first epoch (dominated by JIT compilation), then a
+  steady ~8 s per epoch; 14 min total.
+- **Result**: best validation ESR **0.0070**, reached at epoch 88. For
   reference, ESR below 0.01 is a good model and 0.02–0.05 is usable.
 
-Convergence is fast: ESR hits 0.042 by epoch 3 and 0.0094 by epoch 40, then
-flattens, with the last 20 epochs improving it by under 2% while the training
-loss keeps falling. Epoch-to-epoch validation noise (±40%, with occasional
-early spikes to 0.02–0.04) is larger than those late-stage gains, so which
-epoch wins the best-checkpoint pick is partly luck. For this data and
-architecture, 60–80 epochs would have been enough.
+Convergence is fast: ESR hits 0.054 by epoch 3 and 0.019 by epoch 10, then
+flattens while the training loss keeps falling. The best checkpoint stands at
+0.0086 by epoch 60 and 0.0079 by epoch 80, so the last 40 epochs are still worth
+about 20%. Epoch-to-epoch validation noise is larger than that, though: ESR
+bounces between 0.0070 and 0.018 across epochs 40–100, so which epoch wins the
+best-checkpoint pick is partly luck. At 8 s per epoch there is little reason to
+stop early.
 
-### On GPU choice
+### Where the time goes
 
 The bottleneck is not raw compute. The A1 network is narrow (16 and 8
 channels) but 20 layers deep, so every layer is a small kernel that cannot
-fill a modern GPU, and the layers are serially dependent. The run above
-sustains on the order of 65 GFLOPS against the RX 6800's ~16 TFLOPS FP32
-peak, well under 1% utilization, with the wall clock going to kernel launches
-and memory round-trips rather than arithmetic.
+fill a modern GPU, and the layers are serially dependent. A training step at
+the default batch 16 / `ny` 8192 issues around 800 kernels and sustains
+~350 GFLOPS by tinygrad's op counter, against the RX 6800's ~16 TFLOPS FP32
+peak, a few percent of the card.
 
-This suggests, though it has not been measured, that a considerably weaker
-discrete GPU would train at a broadly similar speed, with memory bandwidth
-rather than FLOPS being the main differentiator. Memory capacity is not a
-constraint either: activations only amount to a few hundred MB.
+Reaching even that took two fixes, both worth knowing about if you port this to
+another backend:
+
+- The backward pass reduces weight gradients over the (batch × time) axis,
+  ~12k long against a handful of output elements. tinygrad only splits such a
+  reduce across two kernels when the input/output element ratio reaches 32768,
+  and this model sits just under that, so those reduces landed in single
+  low-occupancy kernels: two of them alone cost 73 of the 188 ms step, running
+  at 3–11 GFLOPS. `nammy/__init__.py` lowers `REDUCEOP_SPLIT_THRESHOLD` to 8192
+  before tinygrad is imported, which takes the step to 63 ms; set it in the
+  environment to override.
+- Validation ran one 65536-sample chunk at a time at batch 1, rebuilding the
+  graph in Python for each. Chunks are independent, so `WaveNet.process` stacks
+  them on the batch axis under a JIT: 5.3 s → 0.1 s per epoch.
+
+Together those took the epoch from ~26 s to ~8 s, with the same results to
+within float reordering. Memory is not a constraint: activations peak around
+1 GB at the default batch and `ny`.
 
 ## Notes
 
 - Runs on tinygrad's default device.
-- Validation: `uv run tests/test_poc.py` checks receptive field, forward
+- Tests: `uv run tests/test_poc.py` checks receptive field, forward
   parity against an independent numpy implementation, `.nam` export
   round-trip, dataset alignment, and a training smoke test.

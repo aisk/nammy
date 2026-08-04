@@ -92,6 +92,39 @@ Work runs on a single background thread, so the window stays responsive. It has
 to be a single one: tinygrad caches compiled kernels in sqlite, and that
 connection can only be used by the thread that opened it.
 
+### Single-file build
+
+For handing the GUI to someone who has a Python but no interest in installing
+anything:
+
+```console
+$ uv run python tools/build_standalone.py     # -> dist/nammy.pyzw
+```
+
+That is a [zipapp](https://docs.python.org/3/library/zipapp.html): an ordinary
+zip holding nammy and tinygrad with a `__main__.py` at its root, which Windows
+opens with `pythonw` on a double click. Everything is imported from inside the
+archive, so nothing is unpacked and nothing is written anywhere.
+
+It works because neither package needs compiled code, which zipimport cannot
+load. numpy is nammy's one compiled dependency and it is optional:
+`nammy/_numpy_compat.py` stands in for the parts that get used when numpy is
+missing, and `tests/test_no_numpy.py` runs the same work both ways and compares
+the results.
+
+tinygrad needs two patches to run from an archive, both applied by the build
+and both a consequence of there being no real directory to look at: it reads
+the backend list by listing `runtime/`, and it regenerates its ctypes bindings
+over the network when it cannot find their `.py` file. Both patches are matched
+exactly, so a tinygrad upgrade that moves the ground under them fails the build
+with a message rather than quietly producing a file that does not work.
+
+Windows Defender's Controlled Folder Access may report that it "blocked
+python.exe from making changes to memory" (event 1127). That is tinygrad's JIT
+allocating executable memory, it happens however nammy is started, and it has
+not stopped a run here on either the OpenCL or the CPU backend. Allowing the
+interpreter under Ransomware protection silences it.
+
 ## Example training run
 
 Reference numbers from a run on consumer hardware, training on the Blackstar

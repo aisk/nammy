@@ -4,6 +4,9 @@ A proof-of-concept trainer for [Neural Amp Modeler](https://github.com/sdatkinso
 classic **A1 WaveNet architecture**, implemented with [tinygrad](https://github.com/tinygrad/tinygrad)
 instead of PyTorch.
 
+<img alt="GUI" src="https://github.com/user-attachments/assets/1a00f279-a167-438e-aca7-978419e1cf34" />
+
+
 ## What's implemented
 
 - The standard A1 WaveNet: two layer arrays (16 and 8 channels), dilations

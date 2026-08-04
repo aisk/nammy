@@ -19,6 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .data import load_pair, read_wav, write_wav
+from .device import preference, probe, select
 from .train import train
 from .wavenet import WaveNet
 
@@ -133,20 +134,138 @@ class EsrPlot(tk.Canvas):
         )
 
 
+class Engine:
+    """
+    The one thread that all tinygrad work runs on, one job at a time.
+
+    tinygrad memoizes compiled kernels in a sqlite database, and that connection
+    belongs to whichever thread opened it: probing devices on one thread and then
+    training on another fails with "SQLite objects created in a thread can only
+    be used in that same thread". A single worker also means a probe can never
+    land in the middle of a run and repoint the device under it.
+    """
+
+    def __init__(self):
+        self._queue: queue.Queue = queue.Queue()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def submit(self, fn, done) -> None:
+        """Run fn on the engine thread; done(result, error) is called there too."""
+        self._queue.put((fn, done))
+
+    def _serve(self) -> None:
+        while True:
+            fn, done = self._queue.get()
+            try:
+                done(fn(), None)
+            except Exception as exc:  # surfaced in the caller's log, not a dead console
+                done(None, exc)
+
+
+class DeviceBar(ttk.Frame):
+    """
+    The backend picker, shared by both tabs because tinygrad's device is global.
+
+    Every candidate is probed once in the background at startup, which is why
+    the tabs cannot start work until this reports ready: a probe temporarily
+    points tinygrad at another device, and a job starting mid-probe would pick
+    the wrong one up.
+    """
+
+    def __init__(self, master, engine: Engine, initial: str | None = None):
+        super().__init__(master, padding=(10, 8, 10, 0))
+        self._results: dict[str, str | None] = {}
+        self._wanted = initial
+        self.ready = False
+        self._queue: queue.Queue = queue.Queue()
+
+        ttk.Label(self, text="Device").grid(row=0, column=0, sticky="w")
+        self._targets = list(preference())
+        if initial and initial not in self._targets:
+            self._targets.insert(0, initial)
+        self.var = tk.StringVar(value=initial or self._targets[0])
+        self.box = ttk.Combobox(
+            self, textvariable=self.var, values=self._targets, state="disabled", width=12
+        )
+        self.box.grid(row=0, column=1, padx=6)
+        self.box.bind("<<ComboboxSelected>>", lambda _e: self._show_note())
+        self.note = ttk.Label(self, text="probing…", foreground="#606060")
+        self.note.grid(row=0, column=2, sticky="w")
+        self.columnconfigure(2, weight=1)
+
+        engine.submit(self._probe_all, lambda results, _err: self._queue.put(results))
+        self.after(POLL_MS, self._drain)
+
+    @property
+    def target(self) -> str:
+        return self.var.get()
+
+    def set_enabled(self, enabled: bool) -> None:
+        state = "readonly" if enabled and self.ready else "disabled"
+        if str(self.box.cget("state")) != state:
+            self.box.configure(state=state)
+
+    def _probe_all(self) -> dict[str, str | None]:
+        # Engine thread: touches no widget, only returns data.
+        return {t: probe(t) for t in self._targets}
+
+    def _drain(self) -> None:
+        try:
+            self._results = self._queue.get_nowait() or {}
+        except queue.Empty:
+            self.after(POLL_MS, self._drain)
+            return
+        # An explicit request stands even when it failed to probe, so the user
+        # sees why rather than being silently moved to something else.
+        if not self._wanted:
+            working = [t for t, err in self._results.items() if err is None]
+            if working:
+                self.var.set(working[0])
+        self.ready = True
+        self.box.configure(state="readonly")
+        self._show_note()
+
+    def _show_note(self) -> None:
+        error = self._results.get(self.var.get())
+        if error is None:
+            self.note.configure(text="", foreground="#606060")
+        else:
+            self.note.configure(text=f"unavailable — {error}", foreground="#b00000")
+
+
 class _JobTab(ttk.Frame):
     """A tab that runs at most one background job and streams its output to the UI."""
 
-    def __init__(self, master, set_status):
+    def __init__(self, master, set_status, engine: Engine, get_device=lambda: None):
         super().__init__(master, padding=10)
         self._set_status = set_status
+        self._engine = engine
+        self._get_device = get_device
         self._queue: queue.Queue = queue.Queue()
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
+        self._busy = False
+        self._gate = False
+        self._target: str | None = None
         self.after(POLL_MS, self._drain)
 
     @property
     def busy(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        return self._busy
+
+    def set_gate(self, ok: bool) -> None:
+        """Whether starting is allowed at all; the device probe holds this shut."""
+        if ok != self._gate:
+            self._gate = ok
+            self._refresh_buttons()
+
+    def _refresh_buttons(self) -> None:
+        raise NotImplementedError
+
+    def use_device(self) -> str:
+        """Settle the backend on the engine thread; raises DeviceError if it cannot."""
+        target = select(self._target)
+        self.post("log", f"device: {target}")
+        return target
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -157,15 +276,11 @@ class _JobTab(ttk.Frame):
 
     def start_job(self, fn) -> None:
         self._stop.clear()
-
-        def run():
-            try:
-                self.post("done", (fn(), None))
-            except Exception as exc:  # reported in the log, not to a dead console
-                self.post("done", (None, exc))
-
-        self._thread = threading.Thread(target=run, daemon=True)
-        self._thread.start()
+        self._busy = True
+        # Reading the picker is a Tk call, so it has to happen here, on the UI
+        # thread, rather than inside the job.
+        self._target = self._get_device()
+        self._engine.submit(fn, lambda result, error: self.post("done", (result, error)))
 
     def _drain(self) -> None:
         try:
@@ -218,8 +333,8 @@ class _JobTab(ttk.Frame):
 
 
 class TrainTab(_JobTab):
-    def __init__(self, master, set_status):
-        super().__init__(master, set_status)
+    def __init__(self, master, set_status, engine, get_device=lambda: None):
+        super().__init__(master, set_status, engine, get_device)
         self.columnconfigure(1, weight=1)
 
         self.v_input = tk.StringVar()
@@ -241,15 +356,14 @@ class TrainTab(_JobTab):
         self._param(params, 0, 4, "ny", self.v_ny)
         self._param(params, 1, 0, "Learning rate", self.v_lr)
         self._param(params, 1, 2, "Latency (samples)", self.v_latency)
-        ttk.Label(params, text="Device").grid(row=1, column=4, sticky="e", padx=(12, 4), pady=2)
-        self.device_label = ttk.Label(params, text="…", foreground="#606060")
-        self.device_label.grid(row=1, column=5, sticky="w", pady=2)
         params.columnconfigure(6, weight=1)
 
         controls = ttk.Frame(self)
         controls.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(8, 2))
         controls.columnconfigure(2, weight=1)
-        self.start_button = ttk.Button(controls, text="Start", command=self._start, width=10)
+        self.start_button = ttk.Button(
+            controls, text="Start", command=self._start, width=10, state="disabled"
+        )
         self.start_button.grid(row=0, column=0)
         self.stop_button = ttk.Button(
             controls, text="Stop", command=self._request_stop, width=10, state="disabled"
@@ -277,22 +391,12 @@ class TrainTab(_JobTab):
             for w in list(self.grid_slaves()) + list(params.grid_slaves())
             if isinstance(w, (ttk.Entry, ttk.Button))
         ]
-        threading.Thread(target=self._probe_device, daemon=True).start()
 
     @staticmethod
     def _param(parent, row: int, col: int, label: str, var: tk.StringVar) -> None:
         pad = (12, 4) if col else (0, 4)
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="e", padx=pad, pady=2)
         ttk.Entry(parent, textvariable=var, width=9).grid(row=row, column=col + 1, sticky="w")
-
-    def _probe_device(self) -> None:
-        """Naming the device initializes it, so keep it off the startup path."""
-        try:
-            from tinygrad import Device
-
-            self.post("device", Device.DEFAULT)
-        except Exception:
-            self.post("device", "?")
 
     # -- file pickers ------------------------------------------------------
 
@@ -353,16 +457,17 @@ class TrainTab(_JobTab):
         self._total_epochs = params["epochs"]
         self.progress.configure(value=0.0)
         self.summary.configure(text="")
-        self._set_running(True)
         self._set_status("Training…")
         self.start_job(lambda: self._run(params))
+        self._refresh_buttons()
 
     def _request_stop(self) -> None:
-        self.stop_button.configure(state="disabled")
-        self._set_status("Stopping after the current batch…")
         self.request_stop()
+        self._refresh_buttons()
+        self._set_status("Stopping after the current batch…")
 
     def _run(self, p: dict) -> dict:
+        self.use_device()
         x, y, rate = load_pair(p["input"], p["target"], latency=p["latency"])
         self.post("log", f"loaded {len(x)} samples @ {rate} Hz")
         model = WaveNet()
@@ -384,17 +489,20 @@ class TrainTab(_JobTab):
             on_batch=lambda done, total: self.post("batch", (done, total)),
         )
 
-    def _set_running(self, running: bool) -> None:
+    def _refresh_buttons(self) -> None:
+        running = self.busy
         for widget in self._inputs:
             widget.configure(state="disabled" if running else "normal")
-        self.start_button.configure(state="disabled" if running else "normal")
-        self.stop_button.configure(state="normal" if running else "disabled")
+        self.start_button.configure(
+            state="normal" if self._gate and not running else "disabled"
+        )
+        # Stop goes dead the moment it is pressed; the run ends a batch later.
+        stoppable = running and not self._stop.is_set()
+        self.stop_button.configure(state="normal" if stoppable else "disabled")
 
     def handle(self, kind: str, payload) -> None:
         if kind == "log":
             self.append_log(payload)
-        elif kind == "device":
-            self.device_label.configure(text=payload)
         elif kind == "batch":
             done, total = payload
             if total:
@@ -412,7 +520,8 @@ class TrainTab(_JobTab):
             )
         elif kind == "done":
             result, error = payload
-            self._set_running(False)
+            self._busy = False
+            self._refresh_buttons()
             if error is not None:
                 self.append_log(f"error: {error}")
                 self._set_status(f"Failed: {error}")
@@ -426,8 +535,8 @@ class TrainTab(_JobTab):
 
 
 class ProcessTab(_JobTab):
-    def __init__(self, master, set_status):
-        super().__init__(master, set_status)
+    def __init__(self, master, set_status, engine, get_device=lambda: None):
+        super().__init__(master, set_status, engine, get_device)
         self.columnconfigure(1, weight=1)
 
         self.v_model = tk.StringVar()
@@ -440,7 +549,9 @@ class ProcessTab(_JobTab):
         controls = ttk.Frame(self)
         controls.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 2))
         controls.columnconfigure(1, weight=1)
-        self.start_button = ttk.Button(controls, text="Process", command=self._start, width=10)
+        self.start_button = ttk.Button(
+            controls, text="Process", command=self._start, width=10, state="disabled"
+        )
         self.start_button.grid(row=0, column=0)
         self.model_label = ttk.Label(controls, text="", anchor="e", foreground="#606060")
         self.model_label.grid(row=0, column=1, sticky="e")
@@ -490,12 +601,13 @@ class ProcessTab(_JobTab):
             return
         self.clear_log()
         self.progress.configure(value=0.0)
-        self._set_running(True)
         self._set_status("Processing…")
         paths = (self.v_model.get(), self.v_input.get(), self.v_output.get())
         self.start_job(lambda: self._run(*paths))
+        self._refresh_buttons()
 
     def _run(self, model_path: str, in_path: str, out_path: str) -> str:
+        self.use_device()
         model, model_rate = WaveNet.from_nam(model_path)
         x, rate = read_wav(in_path)
         if model_rate is not None and rate != model_rate:
@@ -506,10 +618,13 @@ class ProcessTab(_JobTab):
         self.post("log", f"wrote {out_path}")
         return out_path
 
-    def _set_running(self, running: bool) -> None:
+    def _refresh_buttons(self) -> None:
+        running = self.busy
         for widget in self._inputs:
             widget.configure(state="disabled" if running else "normal")
-        self.start_button.configure(state="disabled" if running else "normal")
+        self.start_button.configure(
+            state="normal" if self._gate and not running else "disabled"
+        )
 
     def handle(self, kind: str, payload) -> None:
         if kind == "log":
@@ -518,7 +633,8 @@ class ProcessTab(_JobTab):
             self.progress.configure(value=payload)
         elif kind == "done":
             result, error = payload
-            self._set_running(False)
+            self._busy = False
+            self._refresh_buttons()
             if error is not None:
                 self.append_log(f"error: {error}")
                 self._set_status(f"Failed: {error}")
@@ -562,25 +678,49 @@ def _enable_dpi_awareness() -> None:
         pass
 
 
-def main() -> None:
-    _enable_dpi_awareness()
-    root = tk.Tk()
+def build(root: tk.Tk, device: str | None = None):
+    """Assemble the window; returns (device bar, tabs, status var)."""
     root.title("nammy")
-    root.minsize(660, 600)
+    root.minsize(660, 620)
     root.columnconfigure(0, weight=1)
-    root.rowconfigure(0, weight=1)
+    root.rowconfigure(1, weight=1)
 
-    status = tk.StringVar(value="Ready.")
+    status = tk.StringVar(value="Probing devices…")
+    engine = Engine()
+    device_bar = DeviceBar(root, engine, initial=device)
+    device_bar.grid(row=0, column=0, sticky="ew")
 
     notebook = ttk.Notebook(root)
-    notebook.grid(row=0, column=0, sticky="nsew")
-    tabs = [TrainTab(notebook, status.set), ProcessTab(notebook, status.set)]
+    notebook.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+    tabs = [
+        TrainTab(notebook, status.set, engine, lambda: device_bar.target),
+        ProcessTab(notebook, status.set, engine, lambda: device_bar.target),
+    ]
     notebook.add(tabs[0], text="  Train  ")
     notebook.add(tabs[1], text="  Process  ")
 
     ttk.Label(root, textvariable=status, relief="sunken", anchor="w", padding=(6, 3)).grid(
-        row=1, column=0, sticky="ew"
+        row=2, column=0, sticky="ew"
     )
+
+    def sync():
+        """Keep the device picker and the Start buttons out of each other's way."""
+        busy = any(tab.busy for tab in tabs)
+        device_bar.set_enabled(not busy)
+        for tab in tabs:
+            tab.set_gate(device_bar.ready and not busy)
+        if device_bar.ready and status.get() == "Probing devices…":
+            status.set("Ready.")
+        root.after(POLL_MS * 2, sync)
+
+    sync()
+    return device_bar, tabs, status
+
+
+def main(device: str | None = None) -> None:
+    _enable_dpi_awareness()
+    root = tk.Tk()
+    _, tabs, _ = build(root, device)
 
     def on_close():
         if any(tab.busy for tab in tabs):

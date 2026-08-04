@@ -5,6 +5,7 @@ POC validation:
 3. .nam export / import_weights round trip
 4. training smoke test on synthetic tanh-distortion data
 5. the progress/stop hooks the GUI drives training through
+6. backend selection: the preference chain and explicit-device errors
 """
 
 import os
@@ -14,6 +15,9 @@ import numpy as np
 
 sys.path.insert(0, ".")
 
+from tinygrad.device import Device
+
+from nammy import device
 from nammy.data import Dataset
 from nammy.train import esr, train
 from nammy.wavenet import WaveNet, a1_config
@@ -147,6 +151,30 @@ def test_dataset():
     print("PASS dataset slicing/alignment")
 
 
+def test_device_selection():
+    chain = device.preference()
+    assert chain[0] == ("METAL" if sys.platform == "darwin" else "CL"), chain
+    assert chain[-1].startswith("CPU"), chain
+    assert len(set(chain)) == len(chain), chain
+
+    # An explicit device that cannot work is an error, never a quiet fallback.
+    assert device.probe("NOT_A_REAL_DEVICE") is not None
+    try:
+        device.select("NOT_A_REAL_DEVICE")
+        raise AssertionError("an impossible device should not be selectable")
+    except device.DeviceError as exc:
+        assert "not usable" in str(exc), exc
+
+    target = device.select()
+    assert device.current() == target
+    assert Device.DEFAULT == target.split(":")[0], (Device.DEFAULT, target)
+    if device._USER_SPLIT_THRESHOLD is None:
+        # The reduce split is a GPU win and a CPU loss, so it tracks the device.
+        threshold = os.environ.get("REDUCEOP_SPLIT_THRESHOLD")
+        assert (threshold is None) == target.startswith("CPU"), (target, threshold)
+    print(f"PASS device selection: {' -> '.join(chain)} picked {target}")
+
+
 def small_config():
     """Small config for CPU speed; same code path as A1."""
     return {
@@ -252,6 +280,7 @@ def test_train_hooks():
 
 
 if __name__ == "__main__":
+    test_device_selection()
     test_shapes()
     test_numpy_parity()
     test_export_roundtrip()

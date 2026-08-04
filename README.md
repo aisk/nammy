@@ -46,6 +46,27 @@ $ uv run python -m nammy process model.nam input.wav output.wav
 This also loads classic-schema (non-gated Tanh WaveNet) `.nam` files trained
 elsewhere.
 
+### Backend
+
+By default nammy tries Metal (on macOS), then OpenCL, then the CPU, and uses
+the first that works. Pick one explicitly with `--device`, accepted by every
+command:
+
+```console
+$ uv run python -m nammy train input.wav output.wav --device CL
+```
+
+Any tinygrad target is accepted, not just the ones in the default chain, so
+`--device AMD`, `--device CUDA` or `--device CPU:X86` all work. An explicit
+choice is never second-guessed: if it cannot run, that is an error rather than a
+silent fall back to something an order of magnitude slower.
+
+Opening a device proves little, so each candidate is tested by compiling and
+running a small kernel on it. tinygrad's CPU device, for one, needs clang and
+opens perfectly well without it, failing only when the first kernel is compiled
+— which is why the `CPU:X86` renderer, which emits machine code in-process and
+needs nothing installed, is in the chain behind it.
+
 ### GUI
 
 There is a small Tkinter front end over the same two commands:
@@ -60,8 +81,13 @@ On Windows you can instead double-click `nammy-gui.pyw`, which re-execs into
 The Train tab streams the training log, plots validation ESR per epoch, and has
 a Stop button that ends the run at the next batch boundary; because `--out` is
 rewritten on every improvement, stopping leaves the best model so far on disk.
-The Process tab reamps a WAV through a `.nam`. Training runs on a worker thread,
-so the window stays responsive.
+The Process tab reamps a WAV through a `.nam`. The device picker at the top is
+shared by both tabs, since tinygrad's device is process-wide; it starts on the
+best candidate that passed its probe, and picking one that failed says why.
+
+Work runs on a single background thread, so the window stays responsive. It has
+to be a single one: tinygrad caches compiled kernels in sqlite, and that
+connection can only be used by the thread that opened it.
 
 ## Example training run
 
@@ -102,10 +128,10 @@ another backend:
   reduce across two kernels when the input/output element ratio reaches 32768,
   and this model sits just under that, so those reduces landed in single
   low-occupancy kernels: two of them alone cost 73 of the 188 ms step, running
-  at 3–11 GFLOPS. `nammy/__init__.py` lowers `REDUCEOP_SPLIT_THRESHOLD` to 8192
-  before tinygrad is imported, which takes the step to 63 ms; set it in the
+  at 3–11 GFLOPS. `nammy/device.py` lowers `REDUCEOP_SPLIT_THRESHOLD` to 8192
+  when it selects an accelerator, which takes the step to 63 ms; set it in the
   environment to override. A CPU has no occupancy to win back and measures a few
-  percent slower, so this is skipped when `DEV` names a CPU device.
+  percent slower, so the setting follows the device rather than being global.
 - Validation ran one 65536-sample chunk at a time at batch 1, rebuilding the
   graph in Python for each. Chunks are independent, so `WaveNet.process` stacks
   them on the batch axis under a JIT: 5.3 s → 0.1 s per epoch.
@@ -116,8 +142,8 @@ within float reordering. Memory is not a constraint: activations peak around
 
 ## Notes
 
-- Runs on tinygrad's default device.
+- Every command takes `--device`; see [Backend](#backend).
 - Tests: `uv run tests/test_poc.py` checks receptive field, forward
   parity against an independent numpy implementation, `.nam` export
-  round-trip, dataset alignment, a training smoke test, and the
-  progress/stop hooks the GUI drives training through.
+  round-trip, dataset alignment, a training smoke test, backend selection, and
+  the progress/stop hooks the GUI drives training through.

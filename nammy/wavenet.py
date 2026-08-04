@@ -16,6 +16,8 @@ from typing import Callable, Optional
 import numpy as np
 from tinygrad import Tensor, TinyJit, nn
 
+from .device import ensure_selected
+
 # Exported .nam files use the classic schema understood by NeuralAmpModelerCore.
 _EXPORT_VERSION = "0.5.4"
 
@@ -189,6 +191,9 @@ class WaveNet:
         return model, d.get("sample_rate")
 
     def __init__(self, config: Optional[dict] = None):
+        # Building the model allocates tensors, so the backend has to be settled
+        # by now; this is a no-op once anything has called device.select().
+        ensure_selected()
         config = config if config is not None else a1_config()
         self.layer_arrays = [_LayerArray(**lc) for lc in config["layers_configs"]]
         self.head_scale = float(config["head_scale"])

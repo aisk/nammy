@@ -11,7 +11,10 @@ import random
 import time
 from typing import Callable
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # a build with no compiled dependencies
+    from . import _numpy_compat as np
 from tinygrad import Tensor, TinyJit
 from tinygrad.nn.optim import Adam
 from tinygrad.nn.state import get_parameters

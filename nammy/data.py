@@ -8,7 +8,10 @@ import random
 import struct
 import wave
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # a build with no compiled dependencies
+    from . import _numpy_compat as np
 
 
 def read_wav(path: str) -> tuple[np.ndarray, int]:

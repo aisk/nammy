@@ -15,7 +15,10 @@ import struct
 from datetime import datetime
 from typing import Callable, Optional, Sequence
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # a build with no compiled dependencies
+    from . import _numpy_compat as np
 from tinygrad import Tensor, TinyJit, dtypes, nn
 
 from .device import ensure_selected

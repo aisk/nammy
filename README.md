@@ -34,6 +34,9 @@ $ uv run python -m nammy train input.wav output.wav --epochs 100 --out model.nam
 must share a sample rate and be time-aligned (use `--latency <samples>` to
 compensate reamp latency).
 
+`--out` is rewritten every time validation ESR improves, so interrupting a run
+leaves the best model so far on disk rather than nothing.
+
 Run audio through a trained model (reamp):
 
 ```console

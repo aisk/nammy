@@ -9,6 +9,7 @@ head rechannel, no gating/FiLM/head-1x1, top-level head disabled.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -268,7 +269,19 @@ class WaveNet:
             "head_scale": self.head_scale,
         }
 
-    def export_nam(self, path: str, sample_rate: float = 48000.0, metadata: Optional[dict] = None) -> None:
+    def export_nam(
+        self,
+        path: str,
+        sample_rate: float = 48000.0,
+        metadata: Optional[dict] = None,
+        weights: Optional[np.ndarray] = None,
+    ) -> None:
+        """
+        Write a classic-schema .nam file.
+
+        :param weights: weights to write instead of the model's current ones,
+            so a checkpoint can be saved without importing it back first.
+        """
         t = datetime.now()
         model_dict = {
             "version": _EXPORT_VERSION,
@@ -287,8 +300,14 @@ class WaveNet:
             },
             "architecture": "WaveNet",
             "config": self.export_config(),
-            "weights": self.export_weights().astype(float).tolist(),
+            "weights": (self.export_weights() if weights is None else weights)
+            .astype(float)
+            .tolist(),
             "sample_rate": sample_rate,
         }
-        with open(path, "w") as fp:
+        # Write-then-rename: checkpoints land mid-training, and an interrupt
+        # during the write must not leave a truncated .nam behind.
+        tmp = f"{path}.tmp"
+        with open(tmp, "w") as fp:
             json.dump(model_dict, fp)
+        os.replace(tmp, path)

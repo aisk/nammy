@@ -34,9 +34,18 @@ def train(
     lr_gamma: float = 0.993,
     validation_fraction: float = 0.1,
     seed: int = 0,
+    out: str | None = None,
+    sample_rate: float = 48000.0,
     log=print,
 ) -> dict:
-    """Train the model on aligned (x, y); returns training history."""
+    """
+    Train the model on aligned (x, y); returns training history.
+
+    :param out: if given, the best checkpoint so far is written there every time
+        validation ESR improves, so an interrupted run still leaves a usable
+        model. The extra json.dump costs ~10 ms; the weights are read back from
+        the device either way to keep the in-memory best.
+    """
     nx = model.receptive_field
     n_val = max(int(len(x) * validation_fraction), nx + ny)
     x_train, y_train = x[:-n_val], y[:-n_val]
@@ -86,11 +95,16 @@ def train(
         history["train_loss"].append(train_loss)
         history["val_esr"].append(val_esr)
         history["val_mse"].append(val_mse)
+        saved = ""
         if val_esr < best_esr:
             best_esr, best_weights = val_esr, model.export_weights()
+            if out is not None:
+                model.export_nam(out, sample_rate=sample_rate, weights=best_weights)
+                saved = "  saved"
         log(
             f"epoch {epoch + 1}/{epochs}  loss {train_loss:.3e}  "
-            f"val ESR {val_esr:.4f}  val MSE {val_mse:.3e}  ({time.time() - t0:.1f}s)"
+            f"val ESR {val_esr:.4f}  val MSE {val_mse:.3e}  "
+            f"({time.time() - t0:.1f}s){saved}"
         )
 
     if best_weights is not None:

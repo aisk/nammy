@@ -18,16 +18,23 @@ def cmd_train(args):
     print(f"loaded {len(x)} samples @ {sample_rate} Hz")
 
     model = WaveNet()
-    train(
-        model,
-        x,
-        y,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        ny=args.ny,
-        lr=args.lr,
-    )
-    model.export_nam(args.out, sample_rate=float(sample_rate))
+    # train() writes args.out whenever the best checkpoint improves, so an
+    # interrupted run still leaves the best model so far on disk.
+    try:
+        train(
+            model,
+            x,
+            y,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            ny=args.ny,
+            lr=args.lr,
+            out=args.out,
+            sample_rate=float(sample_rate),
+        )
+    except KeyboardInterrupt:
+        print(f"\ninterrupted; best checkpoint so far is in {args.out}")
+        return
     print(f"exported {args.out}")
 
 

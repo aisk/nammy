@@ -88,8 +88,8 @@ def main():
 
     # weight layout must match the reference export exactly
     ref_weights = ref.export_weights()
-    assert ref_weights.shape == weights.shape, (ref_weights.shape, weights.shape)
-    layout_err = np.max(np.abs(ref_weights - weights))
+    assert len(ref_weights) == len(weights), (len(ref_weights), len(weights))
+    layout_err = np.max(np.abs(ref_weights - np.asarray(weights, dtype=np.float32)))
     assert layout_err == 0.0, f"weight layout mismatch, max err {layout_err}"
 
     # same input through both

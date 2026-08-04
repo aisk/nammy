@@ -7,6 +7,7 @@ stepped per epoch, MSE loss on ny-sample windows, ESR reported on validation.
 
 from __future__ import annotations
 
+import random
 import time
 from typing import Callable
 
@@ -73,7 +74,7 @@ def train(
     unused_ids = {id(p) for p in unused}
     params = [p for p in get_parameters(model) if id(p) not in unused_ids]
     opt = Adam(params, lr=lr)
-    rng = np.random.default_rng(seed)
+    rng = random.Random(seed)
 
     @TinyJit
     def step(xb: Tensor, yb: Tensor) -> Tensor:
@@ -97,7 +98,7 @@ def train(
                 stopped = True
                 break
             loss = step(Tensor(xb), Tensor(yb))
-            losses.append(float(loss.numpy()))
+            losses.append(loss.item())
             if on_batch is not None:
                 on_batch(i + 1, n_batches)
         if stopped:

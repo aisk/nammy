@@ -9,12 +9,14 @@ head rechannel, no gating/FiLM/head-1x1, top-level head disabled.
 from __future__ import annotations
 
 import json
+import math
 import os
+import struct
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import numpy as np
-from tinygrad import Tensor, TinyJit, nn
+from tinygrad import Tensor, TinyJit, dtypes, nn
 
 from .device import ensure_selected
 
@@ -126,32 +128,29 @@ class _LayerArray:
         mods.append(self.head_rechannel)
         return mods
 
-    def export_weights(self) -> np.ndarray:
-        return np.concatenate([_conv_weights(m) for m in self._weight_modules()])
+    def export_weights(self) -> list[float]:
+        return [v for m in self._weight_modules() for v in _conv_weights(m)]
 
-    def import_weights(self, weights: np.ndarray, i: int) -> int:
+    def import_weights(self, weights: Sequence[float], i: int) -> int:
         for m in self._weight_modules():
             i = _conv_import(m, weights, i)
         return i
 
 
-def _conv_weights(conv) -> np.ndarray:
-    tensors = [conv.weight.numpy().flatten()]
+def _conv_weights(conv) -> list[float]:
+    values = conv.weight.flatten().tolist()
     if conv.bias is not None:
-        tensors.append(conv.bias.numpy().flatten())
-    return np.concatenate(tensors)
+        values += conv.bias.flatten().tolist()
+    return values
 
 
-def _conv_import(conv, weights: np.ndarray, i: int) -> int:
-    n = int(np.prod(conv.weight.shape))
-    conv.weight.assign(
-        Tensor(weights[i : i + n].astype(np.float32).reshape(tuple(conv.weight.shape)))
-    ).realize()
-    i += n
-    if conv.bias is not None:
-        n = int(np.prod(conv.bias.shape))
-        conv.bias.assign(
-            Tensor(weights[i : i + n].astype(np.float32).reshape(tuple(conv.bias.shape)))
+def _conv_import(conv, weights: Sequence[float], i: int) -> int:
+    for param in (conv.weight, conv.bias):
+        if param is None:
+            continue
+        n = math.prod(param.shape)
+        param.assign(
+            Tensor(weights[i : i + n], dtype=dtypes.float32).reshape(param.shape)
         ).realize()
         i += n
     return i
@@ -187,7 +186,7 @@ class WaveNet:
                 }
             )
         model = cls({"layers_configs": layers_configs, "head_scale": cfg["head_scale"]})
-        model.import_weights(np.asarray(d["weights"], dtype=np.float64))
+        model.import_weights(d["weights"])
         return model, d.get("sample_rate")
 
     def __init__(self, config: Optional[dict] = None):
@@ -261,11 +260,15 @@ class WaveNet:
                 progress(min(group[-1] + batch_len, len(x)), len(x))
         return out
 
-    def export_weights(self) -> np.ndarray:
-        weights = np.concatenate([la.export_weights() for la in self.layer_arrays])
-        return np.concatenate([weights, np.array([self.head_scale], dtype=np.float32)])
+    def export_weights(self) -> list[float]:
+        weights = [v for la in self.layer_arrays for v in la.export_weights()]
+        # Every other weight comes back out of a float32 tensor, and NAM keeps
+        # head_scale in the same float32 blob, so it is rounded the same way.
+        # The torch parity test compares the two exports for exact equality.
+        weights.append(struct.unpack("<f", struct.pack("<f", self.head_scale))[0])
+        return weights
 
-    def import_weights(self, weights: np.ndarray) -> None:
+    def import_weights(self, weights: Sequence[float]) -> None:
         # head_scale is baked into a jitted graph as a constant, so drop the jits.
         # (The conv weights are assigned in place and stay valid, but this is rare
         # enough that re-tracing is cheaper than reasoning about it.)
@@ -289,7 +292,7 @@ class WaveNet:
         path: str,
         sample_rate: float = 48000.0,
         metadata: Optional[dict] = None,
-        weights: Optional[np.ndarray] = None,
+        weights: Optional[Sequence[float]] = None,
     ) -> None:
         """
         Write a classic-schema .nam file.
@@ -315,9 +318,7 @@ class WaveNet:
             },
             "architecture": "WaveNet",
             "config": self.export_config(),
-            "weights": (self.export_weights() if weights is None else weights)
-            .astype(float)
-            .tolist(),
+            "weights": self.export_weights() if weights is None else list(weights),
             "sample_rate": sample_rate,
         }
         # Write-then-rename: checkpoints land mid-training, and an interrupt

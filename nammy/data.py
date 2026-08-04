@@ -4,6 +4,7 @@ WAV loading and dataset slicing, mirroring nam.data.Dataset semantics.
 
 from __future__ import annotations
 
+import random
 import struct
 import wave
 
@@ -30,12 +31,15 @@ def _decode_pcm(raw: bytes, sampwidth: int, nchannels: int) -> np.ndarray:
     if sampwidth == 2:
         x = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 2**15
     elif sampwidth == 3:
-        b = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
-        x = np.zeros(len(b), dtype=np.int32)
+        # There is no 24-bit dtype, so rebuild the samples from three byte
+        # planes. Stepped slicing of bytes copies at C speed, and the sign of
+        # a little-endian sample lives entirely in its top byte.
+        raw = raw[: len(raw) // 3 * 3]
+        low, mid, high = raw[0::3], raw[1::3], raw[2::3]
         x = (
-            b[:, 0].astype(np.int32)
-            | (b[:, 1].astype(np.int32) << 8)
-            | (b[:, 2].astype(np.int8).astype(np.int32) << 16)
+            np.frombuffer(low, dtype=np.uint8).astype(np.int32)
+            | (np.frombuffer(mid, dtype=np.uint8).astype(np.int32) << 8)
+            | (np.frombuffer(high, dtype=np.int8).astype(np.int32) << 16)
         )
         x = x.astype(np.float32) / 2**23
     elif sampwidth == 4:
@@ -43,7 +47,7 @@ def _decode_pcm(raw: bytes, sampwidth: int, nchannels: int) -> np.ndarray:
     else:
         raise ValueError(f"Unsupported sample width: {sampwidth}")
     if nchannels > 1:
-        x = x.reshape(-1, nchannels)[:, 0].copy()
+        x = x[::nchannels].copy()
     return x
 
 
@@ -72,7 +76,7 @@ def _read_wav_riff(path: str) -> tuple[np.ndarray, int]:
         x = np.frombuffer(payload[: len(payload) // (bits // 8) * (bits // 8)], dtype=dtype)
         x = x.astype(np.float32)
         if nchannels > 1:
-            x = x.reshape(-1, nchannels)[:, 0].copy()
+            x = x[::nchannels].copy()
         return x, framerate
     elif audio_format == 1:
         return _decode_pcm(payload, bits // 8, nchannels), framerate
@@ -85,8 +89,10 @@ def write_wav(path: str, x: np.ndarray, rate: int, sampwidth: int = 3) -> None:
     if sampwidth == 2:
         frames = (x * (2**15 - 1)).astype("<i2").tobytes()
     elif sampwidth == 3:
-        i32 = (x * (2**23 - 1)).astype("<i4")
-        frames = i32.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
+        # A 24-bit sample is a little-endian int32 without its top byte.
+        buf = bytearray((x * (2**23 - 1)).astype("<i4").tobytes())
+        del buf[3::4]
+        frames = bytes(buf)
     else:
         raise ValueError(f"Unsupported sample width: {sampwidth}")
     with wave.open(path, "wb") as fp:
@@ -123,13 +129,14 @@ class Dataset:
         """How many batches an epoch yields, given that the ragged tail is dropped."""
         return max((len(self) - batch_size) // batch_size + 1, 0)
 
-    def batches(self, batch_size: int, rng: np.random.Generator):
+    def batches(self, batch_size: int, rng: random.Random):
         """Yield (X, Y) numpy batches over a shuffled epoch; drops the ragged tail."""
-        order = rng.permutation(len(self))
+        order = list(range(len(self)))
+        rng.shuffle(order)
         for start in range(0, self.n_batches(batch_size) * batch_size, batch_size):
             idxs = order[start : start + batch_size]
             xs, ys = zip(*(self[i] for i in idxs))
-            yield np.stack(xs)[:, None, :], np.stack(ys)
+            yield np.stack(xs).reshape(len(xs), 1, -1), np.stack(ys)
 
 
 def load_pair(

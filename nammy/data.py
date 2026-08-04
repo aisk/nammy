@@ -119,10 +119,14 @@ class Dataset:
         j = i + self.nx - 1
         return self.x[i : i + self.nx + self.ny - 1], self.y[j : j + self.ny]
 
+    def n_batches(self, batch_size: int) -> int:
+        """How many batches an epoch yields, given that the ragged tail is dropped."""
+        return max((len(self) - batch_size) // batch_size + 1, 0)
+
     def batches(self, batch_size: int, rng: np.random.Generator):
         """Yield (X, Y) numpy batches over a shuffled epoch; drops the ragged tail."""
         order = rng.permutation(len(self))
-        for start in range(0, len(order) - batch_size + 1, batch_size):
+        for start in range(0, self.n_batches(batch_size) * batch_size, batch_size):
             idxs = order[start : start + batch_size]
             xs, ys = zip(*(self[i] for i in idxs))
             yield np.stack(xs)[:, None, :], np.stack(ys)

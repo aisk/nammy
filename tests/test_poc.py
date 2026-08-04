@@ -4,6 +4,7 @@ POC validation:
 2. forward parity vs an independent numpy implementation (same weights)
 3. .nam export / import_weights round trip
 4. training smoke test on synthetic tanh-distortion data
+5. the progress/stop hooks the GUI drives training through
 """
 
 import os
@@ -146,9 +147,9 @@ def test_dataset():
     print("PASS dataset slicing/alignment")
 
 
-def test_training_smoke():
-    # Small config for CPU speed; same code path as A1.
-    config = {
+def small_config():
+    """Small config for CPU speed; same code path as A1."""
+    return {
         "layers_configs": [
             {
                 "input_size": 1,
@@ -171,7 +172,10 @@ def test_training_smoke():
         ],
         "head_scale": 0.02,
     }
-    model = WaveNet(config)
+
+
+def test_training_smoke():
+    model = WaveNet(small_config())
     rng = np.random.default_rng(3)
     x = rng.normal(size=48000).astype(np.float32) * 0.4
     y = np.tanh(3.0 * x).astype(np.float32) * 0.5  # static distortion target
@@ -186,10 +190,72 @@ def test_training_smoke():
     print(f"PASS training smoke: ESR {esr0:.3f} -> {history['best_esr']:.3f}")
 
 
+def test_train_hooks():
+    """The GUI drives training through should_stop/on_epoch/on_batch."""
+    model = WaveNet(small_config())
+    rng = np.random.default_rng(3)
+    x = rng.normal(size=48000).astype(np.float32) * 0.4
+    y = np.tanh(3.0 * x).astype(np.float32) * 0.5
+
+    epochs, batch_size, ny = 4, 8, 1024
+    seen_epochs, seen_batches = [], []
+    history = train(
+        model,
+        x,
+        y,
+        epochs=epochs,
+        batch_size=batch_size,
+        ny=ny,
+        validation_fraction=0.1,
+        on_epoch=seen_epochs.append,
+        on_batch=lambda done, total: seen_batches.append((done, total)),
+        log=lambda _m: None,
+    )
+    assert not history["stopped"]
+    assert len(seen_epochs) == epochs, len(seen_epochs)
+    assert [e["epoch"] for e in seen_epochs] == list(range(1, epochs + 1))
+    assert seen_epochs[-1]["val_esr"] == history["val_esr"][-1]
+    assert seen_epochs[-1]["best_esr"] == history["best_esr"]
+    # on_batch counts up to the batch count the dataset actually yields.
+    n_val = max(int(len(x) * 0.1), model.receptive_field + ny)
+    expected = Dataset(x[:-n_val], y[:-n_val], nx=model.receptive_field, ny=ny).n_batches(
+        batch_size
+    )
+    assert seen_batches[expected - 1] == (expected, expected), seen_batches[:3]
+    assert len(seen_batches) == expected * epochs, (len(seen_batches), expected)
+
+    # process() reports progress the same way, for the GUI's other progress bar.
+    steps = []
+    model.process(
+        x[:5000], batch_len=1024, batch_size=2, progress=lambda d, t: steps.append((d, t))
+    )
+    assert steps[-1] == (5000, 5000), steps
+
+    # Stopping mid-epoch ends the run without recording that epoch.
+    calls = []
+    stopped = train(
+        WaveNet(small_config()),
+        x,
+        y,
+        epochs=epochs,
+        batch_size=batch_size,
+        ny=ny,
+        validation_fraction=0.1,
+        should_stop=lambda: len(calls) >= 2,
+        on_batch=lambda done, _t: calls.append(done),
+        log=lambda _m: None,
+    )
+    assert stopped["stopped"] is True
+    assert len(calls) == 2, calls
+    assert stopped["val_esr"] == [], stopped["val_esr"]
+    print(f"PASS train hooks: {expected} batches/epoch, stop honored after {len(calls)}")
+
+
 if __name__ == "__main__":
     test_shapes()
     test_numpy_parity()
     test_export_roundtrip()
     test_dataset()
     test_training_smoke()
+    test_train_hooks()
     print("all POC tests passed")

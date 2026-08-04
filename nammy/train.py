@@ -8,6 +8,7 @@ stepped per epoch, MSE loss on ny-sample windows, ESR reported on validation.
 from __future__ import annotations
 
 import time
+from typing import Callable
 
 import numpy as np
 from tinygrad import Tensor, TinyJit
@@ -37,6 +38,9 @@ def train(
     out: str | None = None,
     sample_rate: float = 48000.0,
     log=print,
+    should_stop: Callable[[], bool] | None = None,
+    on_epoch: Callable[[dict], None] | None = None,
+    on_batch: Callable[[int, int], None] | None = None,
 ) -> dict:
     """
     Train the model on aligned (x, y); returns training history.
@@ -45,6 +49,11 @@ def train(
         validation ESR improves, so an interrupted run still leaves a usable
         model. The extra json.dump costs ~10 ms; the weights are read back from
         the device either way to keep the in-memory best.
+    :param should_stop: polled once per batch; when it returns true the run ends
+        at that point and still restores the best checkpoint. The CLI relies on
+        KeyboardInterrupt instead, but a GUI has no such signal to raise.
+    :param on_epoch: called with a summary dict after each epoch's validation.
+    :param on_batch: called with (batches done, batches this epoch).
     """
     nx = model.receptive_field
     n_val = max(int(len(x) * validation_fraction), nx + ny)
@@ -78,12 +87,22 @@ def train(
 
     history = {"train_loss": [], "val_esr": [], "val_mse": []}
     best_esr, best_weights = float("inf"), None
+    n_batches = dataset.n_batches(batch_size)
+    stopped = False
     for epoch in range(epochs):
         t0 = time.time()
         losses = []
-        for xb, yb in dataset.batches(batch_size, rng):
+        for i, (xb, yb) in enumerate(dataset.batches(batch_size, rng)):
+            if should_stop is not None and should_stop():
+                stopped = True
+                break
             loss = step(Tensor(xb), Tensor(yb))
             losses.append(float(loss.numpy()))
+            if on_batch is not None:
+                on_batch(i + 1, n_batches)
+        if stopped:
+            log(f"stopped during epoch {epoch + 1}")
+            break
         opt.lr.assign(opt.lr * lr_gamma).realize()
 
         pred_val = model.process(x_val)
@@ -101,14 +120,29 @@ def train(
             if out is not None:
                 model.export_nam(out, sample_rate=sample_rate, weights=best_weights)
                 saved = "  saved"
+        seconds = time.time() - t0
         log(
             f"epoch {epoch + 1}/{epochs}  loss {train_loss:.3e}  "
             f"val ESR {val_esr:.4f}  val MSE {val_mse:.3e}  "
-            f"({time.time() - t0:.1f}s){saved}"
+            f"({seconds:.1f}s){saved}"
         )
+        if on_epoch is not None:
+            on_epoch(
+                {
+                    "epoch": epoch + 1,
+                    "epochs": epochs,
+                    "train_loss": train_loss,
+                    "val_esr": val_esr,
+                    "val_mse": val_mse,
+                    "best_esr": best_esr,
+                    "seconds": seconds,
+                    "saved": bool(saved),
+                }
+            )
 
     if best_weights is not None:
         model.import_weights(best_weights)
         log(f"restored best checkpoint (val ESR {best_esr:.4f})")
     history["best_esr"] = best_esr
+    history["stopped"] = stopped
     return history

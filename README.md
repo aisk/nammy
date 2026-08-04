@@ -46,6 +46,23 @@ $ uv run python -m nammy process model.nam input.wav output.wav
 This also loads classic-schema (non-gated Tanh WaveNet) `.nam` files trained
 elsewhere.
 
+### GUI
+
+There is a small Tkinter front end over the same two commands:
+
+```console
+$ uv run python -m nammy gui
+```
+
+On Windows you can instead double-click `nammy-gui.pyw`, which re-execs into
+`.venv` so the system Python does not need the dependencies installed.
+
+The Train tab streams the training log, plots validation ESR per epoch, and has
+a Stop button that ends the run at the next batch boundary; because `--out` is
+rewritten on every improvement, stopping leaves the best model so far on disk.
+The Process tab reamps a WAV through a `.nam`. Training runs on a worker thread,
+so the window stays responsive.
+
 ## Example training run
 
 Reference numbers from a run on consumer hardware, training on the Blackstar
@@ -102,4 +119,5 @@ within float reordering. Memory is not a constraint: activations peak around
 - Runs on tinygrad's default device.
 - Tests: `uv run tests/test_poc.py` checks receptive field, forward
   parity against an independent numpy implementation, `.nam` export
-  round-trip, dataset alignment, and a training smoke test.
+  round-trip, dataset alignment, a training smoke test, and the
+  progress/stop hooks the GUI drives training through.

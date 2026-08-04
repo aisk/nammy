@@ -4,6 +4,7 @@ nammy: a tinygrad-based trainer for NAM's classic ("A1") WaveNet architecture.
 Usage:
     uv run python -m nammy train input.wav output.wav [--epochs N] [--out model.nam] ...
     uv run python -m nammy process model.nam input.wav output.wav
+    uv run python -m nammy gui
 """
 
 import argparse
@@ -49,6 +50,13 @@ def cmd_process(args):
     print(f"wrote {args.output}")
 
 
+def cmd_gui(args):
+    # Imported here so the CLI does not pay for tkinter, which may be absent.
+    from nammy.gui import main as gui_main
+
+    gui_main()
+
+
 def main():
     parser = argparse.ArgumentParser(description="NAM WaveNet (A1) trainer on tinygrad")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -69,6 +77,9 @@ def main():
     p_proc.add_argument("input", help="Input WAV to process")
     p_proc.add_argument("output", help="Where to write the processed WAV (24-bit PCM)")
     p_proc.set_defaults(func=cmd_process)
+
+    p_gui = sub.add_parser("gui", help="Open the Tkinter GUI")
+    p_gui.set_defaults(func=cmd_gui)
 
     args = parser.parse_args()
     args.func(args)

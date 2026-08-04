@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from tinygrad import Tensor, TinyJit, nn
@@ -216,7 +216,13 @@ class WaveNet:
             self._jits[key] = TinyJit(lambda t: self(t).realize())
         return self._jits[key]
 
-    def process(self, x: np.ndarray, batch_len: int = 65536, batch_size: int = 16) -> np.ndarray:
+    def process(
+        self,
+        x: np.ndarray,
+        batch_len: int = 65536,
+        batch_size: int = 16,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> np.ndarray:
         """
         Run a 1D signal through the model, padding so output aligns with input.
 
@@ -225,6 +231,8 @@ class WaveNet:
         One chunk at a time leaves the kernels far too small to fill the GPU and
         rebuilds the graph in Python for every chunk: batching under a JIT is 11x
         faster on the same signal (5.33s -> 0.47s for a 1.5M-sample validation set).
+
+        :param progress: called with (samples done, total) after each batch.
         """
         pad = self.receptive_field - 1
         x_padded = np.concatenate([np.zeros(pad, dtype=np.float32), x.astype(np.float32)])
@@ -244,6 +252,8 @@ class WaveNet:
             for row, start in enumerate(group):
                 n = min(batch_len, len(x) - start)
                 out[start : start + n] = y[row, 0, :n]
+            if progress is not None:
+                progress(min(group[-1] + batch_len, len(x)), len(x))
         return out
 
     def export_weights(self) -> np.ndarray:

@@ -1,7 +1,7 @@
 # nammy
 
 A proof-of-concept trainer for [Neural Amp Modeler](https://github.com/sdatkinson/neural-amp-modeler)'s
-classic **A1 WaveNet architecture**, implemented with [tinygrad](https://github.com/tinygrad/tinygrad)
+**WaveNet architectures (A1 and A2)**, implemented with [tinygrad](https://github.com/tinygrad/tinygrad)
 instead of PyTorch.
 
 <img alt="GUI" src="https://github.com/user-attachments/assets/1a00f279-a167-438e-aca7-978419e1cf34" />
@@ -9,20 +9,26 @@ instead of PyTorch.
 
 ## What's implemented
 
-- The standard A1 WaveNet: two layer arrays (16 and 8 channels), dilations
-  1–512, kernel size 3, Tanh, residual 1x1s, per-array head rechannel,
-  `head_scale = 0.02`, receptive field 4093 — a faithful port of
-  `nam.models.wavenet`.
+- The current standard **A2** WaveNet (the default; `--arch a2`, or `a2-lite`
+  for the 3-channel variant): one 23-layer array with LeakyReLU, restarting
+  dilations, mixed kernel sizes (6 and 15) and a 16-tap head conv,
+  `head_scale = 0.01`, receptive field 6347 — a faithful port of
+  `nam.models.wavenet` with the reference trainer's current config.
+- The classic **A1** WaveNet (`--arch a1`): two layer arrays (16 and 8
+  channels), dilations 1–512, kernel size 3, Tanh, residual 1x1s, per-array
+  1x1 head rechannel, `head_scale = 0.02`, receptive field 4093.
 - NAM-style data pipeline: WAV loading (PCM 16/24/32 and IEEE float),
   latency compensation, and `(nx+ny-1, ny)` window slicing matching
   `nam.data.Dataset`.
 - Training matching NAM's standard learning config: Adam(lr=0.004),
   per-epoch exponential LR decay (gamma 0.993), MSE loss, ESR validation with
   best-checkpoint restore, JIT-compiled train step and batched JIT inference.
-- Export to `.nam` (classic v0.5.4 schema) loadable by the NAM plugin.
+- Export to `.nam`: A1 models write the classic v0.5.4 schema every plugin
+  version can read; A2 models write the current v0.7.0 schema (needs a recent
+  NAM plugin). Both schemas load back via `process`/the GUI.
 
-Not implemented (yet): A2/packed training, gated/FiLM variants, MRSTFT loss,
-pre-emphasis, output loudness normalization, the standardized input-file
+Not implemented (yet): packed/slimmable training, gated/FiLM variants, MRSTFT
+loss, pre-emphasis, output loudness normalization, the standardized input-file
 splits/checks.
 
 ## Usage

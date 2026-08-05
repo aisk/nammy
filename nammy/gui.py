@@ -21,7 +21,7 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 from .data import load_pair, read_wav, write_wav
 from .device import preference, probe, select
 from .train import train
-from .wavenet import WaveNet
+from .wavenet import ARCHITECTURES, WaveNet
 
 POLL_MS = 100
 LOG_MAX_LINES = 4000
@@ -349,6 +349,7 @@ class TrainTab(_JobTab):
         self.v_ny = tk.StringVar(value="8192")
         self.v_lr = tk.StringVar(value="0.004")
         self.v_latency = tk.StringVar(value="0")
+        self.v_arch = tk.StringVar(value=next(iter(ARCHITECTURES)))
         params = ttk.LabelFrame(self, text="Parameters", padding=6)
         params.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self._param(params, 0, 0, "Epochs", self.v_epochs)
@@ -356,6 +357,16 @@ class TrainTab(_JobTab):
         self._param(params, 0, 4, "ny", self.v_ny)
         self._param(params, 1, 0, "Learning rate", self.v_lr)
         self._param(params, 1, 2, "Latency (samples)", self.v_latency)
+        ttk.Label(params, text="Architecture").grid(
+            row=1, column=4, sticky="e", padx=(12, 4), pady=2
+        )
+        ttk.Combobox(
+            params,
+            textvariable=self.v_arch,
+            values=list(ARCHITECTURES),
+            state="readonly",
+            width=8,
+        ).grid(row=1, column=5, sticky="w")
         params.columnconfigure(6, weight=1)
 
         controls = ttk.Frame(self)
@@ -440,6 +451,7 @@ class TrainTab(_JobTab):
             "ny": _num(self.v_ny.get(), "ny", int, minimum=1),
             "lr": _num(self.v_lr.get(), "Learning rate", float, minimum=0.0),
             "latency": _num(self.v_latency.get(), "Latency", int),
+            "arch": self.v_arch.get(),
         }
 
     def _start(self) -> None:
@@ -470,7 +482,7 @@ class TrainTab(_JobTab):
         self.use_device()
         x, y, rate = load_pair(p["input"], p["target"], latency=p["latency"])
         self.post("log", f"loaded {len(x)} samples @ {rate} Hz")
-        model = WaveNet()
+        model = WaveNet(ARCHITECTURES[p["arch"]]())
         # train() rewrites p["out"] on every improvement, so stopping early still
         # leaves the best model so far on disk.
         return train(

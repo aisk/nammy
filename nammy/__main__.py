@@ -1,5 +1,5 @@
 """
-nammy: a tinygrad-based trainer for NAM's classic ("A1") WaveNet architecture.
+nammy: a tinygrad-based trainer for NAM's WaveNet architectures (A1 and A2).
 
 Usage:
     uv run python -m nammy train input.wav output.wav [--epochs N] [--out model.nam] ...
@@ -12,7 +12,7 @@ import argparse
 from nammy.data import load_pair, read_wav, write_wav
 from nammy.device import DeviceError, preference, select
 from nammy.train import train
-from nammy.wavenet import WaveNet
+from nammy.wavenet import ARCHITECTURES, WaveNet
 
 
 def use_device(args):
@@ -28,7 +28,7 @@ def cmd_train(args):
     x, y, sample_rate = load_pair(args.input, args.output, latency=args.latency)
     print(f"loaded {len(x)} samples @ {sample_rate} Hz")
 
-    model = WaveNet()
+    model = WaveNet(ARCHITECTURES[args.arch]())
     # train() writes args.out whenever the best checkpoint improves, so an
     # interrupted run still leaves the best model so far on disk.
     try:
@@ -69,7 +69,7 @@ def cmd_gui(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="NAM WaveNet (A1) trainer on tinygrad")
+    parser = argparse.ArgumentParser(description="NAM WaveNet trainer on tinygrad")
     sub = parser.add_subparsers(dest="command", required=True)
 
     # --device belongs to every subcommand, so it can follow the positionals.
@@ -86,6 +86,13 @@ def main():
     )
     p_train.add_argument("input", help="Input (DI/reamp source) WAV")
     p_train.add_argument("output", help="Output (amp-processed) WAV")
+    p_train.add_argument(
+        "--arch",
+        choices=list(ARCHITECTURES),
+        default="a2",
+        help="Model architecture: a2 (current NAM standard), a2-lite (3 channels), "
+        "a1 (classic WaveNet)",
+    )
     p_train.add_argument("--epochs", type=int, default=100)
     p_train.add_argument("--batch-size", type=int, default=16)
     p_train.add_argument("--ny", type=int, default=8192)

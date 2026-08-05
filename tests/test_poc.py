@@ -20,7 +20,7 @@ from tinygrad.device import Device
 from nammy import device
 from nammy.data import Dataset
 from nammy.train import esr, train
-from nammy.wavenet import WaveNet, a1_config
+from nammy.wavenet import WaveNet, a1_config, a2_config
 
 
 # --- independent numpy reference (direct port of nam.models.wavenet semantics) ---
@@ -49,7 +49,12 @@ def np_wavenet_forward(model, x):
     c = x[None, :]
     y, head_input = c, None
     for la in model.layer_arrays:
-        out_length = min(y.shape[1], c.shape[1]) - (la.receptive_field - 1)
+        # The head rechannel eats (head_kernel - 1) samples after the layer sum.
+        pre_head = min(y.shape[1], c.shape[1]) - (la.receptive_field - la.head_kernel)
+        act = {
+            "Tanh": np.tanh,
+            "LeakyReLU": lambda v: np.where(v > 0, v, 0.01 * v),
+        }[la._config["activation"]]
         w, _ = wb(la.rechannel)
         z = np_conv1d(y, w, None)
         for layer in la.layers:
@@ -57,86 +62,118 @@ def np_wavenet_forward(model, x):
             zconv = np_conv1d(z, wc, bc, dilation=layer.dilation)
             wm, _ = wb(layer.input_mixer)
             mix = np_conv1d(c, wm, None)[:, -zconv.shape[1] :]
-            post = np.tanh(zconv + mix)
+            post = act(zconv + mix)
             w1, b1 = wb(layer.layer1x1)
             layer_out = np_conv1d(post, w1, b1)
-            head_term = post[:, -out_length:]
+            head_term = post[:, -pre_head:]
             head_input = (
-                head_term if head_input is None else head_input[:, -out_length:] + head_term
+                head_term if head_input is None else head_input[:, -pre_head:] + head_term
             )
             z = z[:, -layer_out.shape[1] :] + layer_out
         wh, bh = wb(la.head_rechannel)
         head_input = np_conv1d(head_input, wh, bh)
-        y = z[:, -out_length:]
+        y = z[:, -(pre_head - (la.head_kernel - 1)) :]
     return (model.head_scale * head_input)[0]
 
 
 def test_shapes():
-    model = WaveNet()
-    assert model.receptive_field == 4093, model.receptive_field
     from tinygrad import Tensor
 
-    length = 5000
-    out = model(Tensor(np.random.default_rng(0).normal(size=(2, 1, length)).astype(np.float32)))
-    assert out.shape == (2, 1, length - 4092), out.shape
-    print("PASS shapes: receptive field 4093, output (2,1,908)")
+    for name, config, rf in [("a1", a1_config(), 4093), ("a2", a2_config(), 6347)]:
+        model = WaveNet(config)
+        assert model.receptive_field == rf, (name, model.receptive_field)
+        length = rf + 907
+        out = model(
+            Tensor(np.random.default_rng(0).normal(size=(2, 1, length)).astype(np.float32))
+        )
+        assert out.shape == (2, 1, 908), (name, out.shape)
+        print(f"PASS shapes {name}: receptive field {rf}, output (2,1,908)")
+    assert WaveNet().receptive_field == 6347  # the default is a2
 
 
 def test_numpy_parity():
-    model = WaveNet()
-    rng = np.random.default_rng(1)
-    x = rng.normal(size=6000).astype(np.float32) * 0.5
     from tinygrad import Tensor
 
-    got = model(Tensor(x.reshape(1, 1, -1))).numpy().flatten()
-    want = np_wavenet_forward(model, x)
-    err = np.max(np.abs(got - want))
-    assert err < 1e-4, f"parity error {err}"
-    print(f"PASS numpy parity: max abs err {err:.2e} over {len(want)} samples")
+    for name, config in [("a1", a1_config()), ("a2", a2_config())]:
+        model = WaveNet(config)
+        rng = np.random.default_rng(1)
+        x = rng.normal(size=8000).astype(np.float32) * 0.5
+        got = model(Tensor(x.reshape(1, 1, -1))).numpy().flatten()
+        want = np_wavenet_forward(model, x)
+        err = np.max(np.abs(got - want))
+        assert err < 1e-4, f"{name} parity error {err}"
+        print(f"PASS numpy parity {name}: max abs err {err:.2e} over {len(want)} samples")
+
+
+def _expected_weight_count(config: dict) -> int:
+    """rechannel + per layer (conv + mixer + 1x1) + head_rechannel, + head_scale."""
+
+    def conv_n(cin, cout, k, bias):
+        return cout * cin * k + (cout if bias else 0)
+
+    expect = 0
+    for lc in config["layers_configs"]:
+        ch, head = lc["channels"], lc["head"]
+        ks = lc["kernel_sizes"]
+        ks = [ks] * len(lc["dilations"]) if isinstance(ks, int) else ks
+        expect += conv_n(lc["input_size"], ch, 1, False)
+        expect += sum(
+            conv_n(ch, ch, k, True) + conv_n(1, ch, 1, False) + conv_n(ch, ch, 1, True)
+            for k in ks
+        )
+        expect += conv_n(ch, head["out_channels"], head["kernel_size"], head["bias"])
+    return expect + 1  # head_scale
 
 
 def test_export_roundtrip(tmp_path=None):
     import json
     import tempfile
 
-    model = WaveNet()
-    weights = model.export_weights()
-    # Expected count: per array: rechannel + n*(conv + mixer + 1x1) + head_rechannel; +1 head_scale
-    def conv_n(cin, cout, k, bias):
-        return cout * cin * k + (cout if bias else 0)
-
-    expect = 0
-    for lc in a1_config()["layers_configs"]:
-        ch, k, n = lc["channels"], lc["kernel_size"], len(lc["dilations"])
-        expect += conv_n(lc["input_size"], ch, 1, False)
-        expect += n * (conv_n(ch, ch, k, True) + conv_n(1, ch, 1, False) + conv_n(ch, ch, 1, True))
-        expect += conv_n(ch, lc["head_size"], 1, lc["head_bias"])
-    expect += 1  # head_scale
-    assert len(weights) == expect, (len(weights), expect)
-
-    model2 = WaveNet()
-    model2.import_weights(weights)
-    assert np.allclose(model2.export_weights(), weights)
-
-    rng = np.random.default_rng(2)
-    x = rng.normal(size=5000).astype(np.float32) * 0.3
     from tinygrad import Tensor
 
-    a = model(Tensor(x.reshape(1, 1, -1))).numpy()
-    b = model2(Tensor(x.reshape(1, 1, -1))).numpy()
-    # head_scale is stored as float32 in the weight blob (as in NAM), so allow
-    # for its rounding: 0.02 -> 0.019999999552965164.
-    assert np.allclose(a, b, atol=1e-6), "round-trip changed outputs"
+    for name, config in [("a1", a1_config()), ("a2", a2_config())]:
+        model = WaveNet(config)
+        weights = model.export_weights()
+        expect = _expected_weight_count(config)
+        assert len(weights) == expect, (name, len(weights), expect)
 
-    path = os.path.join(tmp_path or tempfile.gettempdir(), "roundtrip.nam")
-    model.export_nam(path)
-    with open(path) as fp:
-        d = json.load(fp)
-    assert d["architecture"] == "WaveNet"
-    assert len(d["weights"]) == expect
-    assert d["config"]["layers"][0]["channels"] == 16
-    assert d["config"]["layers"][1]["head_bias"] is True
-    print(f"PASS export round-trip: {expect} weights, .nam JSON OK")
+        model2 = WaveNet(config)
+        model2.import_weights(weights)
+        assert np.allclose(model2.export_weights(), weights)
+
+        rng = np.random.default_rng(2)
+        x = rng.normal(size=8000).astype(np.float32) * 0.3
+        a = model(Tensor(x.reshape(1, 1, -1))).numpy()
+        b = model2(Tensor(x.reshape(1, 1, -1))).numpy()
+        # head_scale is stored as float32 in the weight blob (as in NAM), so allow
+        # for its rounding: 0.02 -> 0.019999999552965164.
+        assert np.allclose(a, b, atol=1e-6), f"{name} round-trip changed outputs"
+
+        path = os.path.join(tmp_path or tempfile.gettempdir(), f"roundtrip-{name}.nam")
+        model.export_nam(path)
+        with open(path) as fp:
+            d = json.load(fp)
+        assert d["architecture"] == "WaveNet"
+        assert len(d["weights"]) == expect
+        layer0 = d["config"]["layers"][0]
+        if name == "a1":
+            # A1 fits the classic schema, which every plugin version can read.
+            assert d["version"] == "0.5.4", d["version"]
+            assert layer0["channels"] == 16 and layer0["kernel_size"] == 3
+            assert d["config"]["layers"][1]["head_bias"] is True
+        else:
+            assert d["version"] == "0.7.0", d["version"]
+            assert layer0["kernel_sizes"] == [6] * 14 + [15, 15] + [6] * 7
+            assert layer0["head"] == {"out_channels": 1, "kernel_size": 16, "bias": True}
+            assert layer0["activation"][0] == {"type": "LeakyReLU", "negative_slope": 0.01}
+            assert layer0["gating_mode"] == ["none"] * 23
+
+        # Loading the file back must reproduce the model (covers both schemas).
+        loaded, rate = WaveNet.from_nam(path)
+        assert rate == 48000.0
+        assert loaded.receptive_field == model.receptive_field
+        assert np.allclose(loaded.export_weights(), weights)
+        print(f"PASS export round-trip {name}: {expect} weights, .nam JSON OK")
 
 
 def test_dataset():
@@ -176,26 +213,26 @@ def test_device_selection():
 
 
 def small_config():
-    """Small config for CPU speed; same code path as A1."""
+    """Small config for CPU speed; A1's shape with A2's head conv and activation."""
     return {
         "layers_configs": [
             {
                 "input_size": 1,
                 "condition_size": 1,
                 "channels": 8,
-                "head_size": 4,
-                "kernel_size": 3,
+                "head": {"out_channels": 4, "kernel_size": 1, "bias": False},
+                "kernel_sizes": 3,
                 "dilations": [1, 2, 4, 8, 16, 32],
-                "head_bias": False,
+                "activation": "Tanh",
             },
             {
                 "input_size": 8,
                 "condition_size": 1,
                 "channels": 4,
-                "head_size": 1,
-                "kernel_size": 3,
+                "head": {"out_channels": 1, "kernel_size": 4, "bias": True},
+                "kernel_sizes": 3,
                 "dilations": [1, 2, 4, 8, 16, 32],
-                "head_bias": True,
+                "activation": "LeakyReLU",
             },
         ],
         "head_scale": 0.02,

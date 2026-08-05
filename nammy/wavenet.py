@@ -1,9 +1,10 @@
 """
-NAM WaveNet (classic "A1" architecture) implemented with tinygrad.
+NAM WaveNet (the "A1" and "A2" architectures) implemented with tinygrad.
 
-Faithful port of neural-amp-modeler's nam.models.wavenet with the A1 feature
-set: dilated conv + condition input mixer + Tanh + residual 1x1, per-array
-head rechannel, no gating/FiLM/head-1x1, top-level head disabled.
+Faithful port of neural-amp-modeler's nam.models.wavenet, covering the feature
+set the standard architectures use: dilated conv + condition input mixer +
+activation + residual 1x1, per-array head rechannel (a plain causal conv, 1x1
+in A1 and 16-tap in A2), no gating/FiLM/head-1x1, top-level head disabled.
 """
 
 from __future__ import annotations
@@ -23,45 +24,98 @@ from tinygrad import Tensor, TinyJit, dtypes, nn
 
 from .device import ensure_selected
 
-# Exported .nam files use the classic schema understood by NeuralAmpModelerCore.
-_EXPORT_VERSION = "0.5.4"
+# A1-shaped models (uniform kernel, 1x1 head rechannel) export the classic
+# schema every NeuralAmpModelerCore can read; A2 needs the current one.
+_EXPORT_VERSION_CLASSIC = "0.5.4"
+_EXPORT_VERSION = "0.7.0"
+
+# torch's LeakyReLU default negative_slope, which is what NAM trains with.
+_ACTIVATIONS: dict[str, Callable[[Tensor], Tensor]] = {
+    "Tanh": Tensor.tanh,
+    "LeakyReLU": lambda t: t.leaky_relu(0.01),
+}
+
+_FILM_KEYS = (
+    "conv_pre_film",
+    "conv_post_film",
+    "input_mixin_pre_film",
+    "input_mixin_post_film",
+    "activation_pre_film",
+    "activation_post_film",
+    "layer1x1_post_film",
+    "head1x1_post_film",
+)
 
 
 def a1_config() -> dict:
-    """The standard WaveNet config (nam_full_configs/models/wavenet.json)."""
+    """The classic standard WaveNet (nam_full_configs/models/wavenet.json)."""
     dilations = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+
+    def layer(input_size: int, channels: int, head_out: int, head_bias: bool) -> dict:
+        return {
+            "input_size": input_size,
+            "condition_size": 1,
+            "channels": channels,
+            "head": {"out_channels": head_out, "kernel_size": 1, "bias": head_bias},
+            "kernel_sizes": 3,
+            "dilations": list(dilations),
+            "activation": "Tanh",
+        }
+
+    return {
+        "layers_configs": [layer(1, 16, 8, False), layer(16, 8, 1, True)],
+        "head_scale": 0.02,
+    }
+
+
+def a2_config(channels: int = 8) -> dict:
+    """
+    The current default architecture (nam/train/_resources/config_model_packed.json):
+    one LeakyReLU layer array with restarting dilations, two 15-tap layers among
+    the 6-tap ones, and a 16-tap head rechannel. The reference trainer packs the
+    8-channel ("standard") and 3-channel ("lite") widths into one training run;
+    here they are simply two values of `channels`.
+    """
+    dilations = [1, 3, 7, 17, 41, 101, 239]
     return {
         "layers_configs": [
             {
                 "input_size": 1,
                 "condition_size": 1,
-                "channels": 16,
-                "head_size": 8,
-                "kernel_size": 3,
-                "dilations": list(dilations),
-                "head_bias": False,
-            },
-            {
-                "input_size": 16,
-                "condition_size": 1,
-                "channels": 8,
-                "head_size": 1,
-                "kernel_size": 3,
-                "dilations": list(dilations),
-                "head_bias": True,
-            },
+                "channels": channels,
+                "head": {"out_channels": 1, "kernel_size": 16, "bias": True},
+                "kernel_sizes": [6] * 14 + [15, 15] + [6] * 7,
+                "dilations": dilations * 2 + [1, 13] + dilations,
+                "activation": "LeakyReLU",
+            }
         ],
-        "head_scale": 0.02,
+        "head_scale": 0.01,
     }
 
 
+# The selectable presets, in the order UIs should offer them.
+ARCHITECTURES: dict[str, Callable[[], dict]] = {
+    "a2": a2_config,
+    "a2-lite": lambda: a2_config(channels=3),
+    "a1": a1_config,
+}
+
+
 class _Layer:
-    def __init__(self, condition_size: int, channels: int, kernel_size: int, dilation: int):
+    def __init__(
+        self,
+        condition_size: int,
+        channels: int,
+        kernel_size: int,
+        dilation: int,
+        activation: str,
+    ):
         self.conv = nn.Conv1d(channels, channels, kernel_size, dilation=dilation, bias=True)
         self.input_mixer = nn.Conv1d(condition_size, channels, 1, bias=False)
         self.layer1x1 = nn.Conv1d(channels, channels, 1, bias=True)
         self.kernel_size = kernel_size
         self.dilation = dilation
+        self.activation = _ACTIVATIONS[activation]
 
     def __call__(self, x: Tensor, h: Tensor, out_length: int) -> tuple[Tensor, Tensor]:
         """
@@ -71,7 +125,7 @@ class _Layer:
         """
         zconv = self.conv(x)
         mix = self.input_mixer(h)[:, :, -zconv.shape[2] :]
-        post_activation = (zconv + mix).tanh()
+        post_activation = self.activation(zconv + mix)
         layer_output = self.layer1x1(post_activation)
         head_output = post_activation[:, :, -out_length:]
         residual = x[:, :, -layer_output.shape[2] :] + layer_output
@@ -84,45 +138,100 @@ class _LayerArray:
         input_size: int,
         condition_size: int,
         channels: int,
-        head_size: int,
-        kernel_size: int,
+        head: dict,
+        kernel_sizes: int | Sequence[int],
         dilations: list[int],
-        head_bias: bool,
+        activation: str,
     ):
+        if isinstance(kernel_sizes, int):
+            kernel_sizes = [kernel_sizes] * len(dilations)
+        assert len(kernel_sizes) == len(dilations), (kernel_sizes, dilations)
         self.rechannel = nn.Conv1d(input_size, channels, 1, bias=False)
-        self.layers = [_Layer(condition_size, channels, kernel_size, d) for d in dilations]
-        self.head_rechannel = nn.Conv1d(channels, head_size, 1, bias=head_bias)
+        self.layers = [
+            _Layer(condition_size, channels, k, d, activation)
+            for k, d in zip(kernel_sizes, dilations)
+        ]
+        self.head_kernel = int(head["kernel_size"])
+        self.head_rechannel = nn.Conv1d(
+            channels, head["out_channels"], head["kernel_size"], bias=head["bias"]
+        )
         self._config = {
             "input_size": input_size,
             "condition_size": condition_size,
             "channels": channels,
-            "head_size": head_size,
-            "kernel_size": kernel_size,
+            "head": dict(head),
+            "kernel_sizes": list(kernel_sizes),
             "dilations": list(dilations),
-            "head_bias": head_bias,
+            "activation": activation,
         }
 
     @property
     def receptive_field(self) -> int:
-        return 1 + sum((layer.kernel_size - 1) * layer.dilation for layer in self.layers)
+        layers = 1 + sum((layer.kernel_size - 1) * layer.dilation for layer in self.layers)
+        return layers + self.head_kernel - 1
 
     def __call__(
         self, x: Tensor, c: Tensor, head_input: Optional[Tensor] = None
     ) -> tuple[Tensor, Tensor]:
-        out_length = min(x.shape[2], c.shape[2]) - (self.receptive_field - 1)
+        # The head rechannel is a valid conv too, so the head sum runs at a
+        # length that leaves it (head_kernel - 1) samples to consume.
+        pre_head = min(x.shape[2], c.shape[2]) - (self.receptive_field - self.head_kernel)
         x = self.rechannel(x)
         for layer in self.layers:
-            x, head_term = layer(x, c, out_length)
+            x, head_term = layer(x, c, pre_head)
             head_input = (
-                head_term if head_input is None else head_input[:, :, -out_length:] + head_term
+                head_term if head_input is None else head_input[:, :, -pre_head:] + head_term
             )
+        out_length = pre_head - (self.head_kernel - 1)
         return self.head_rechannel(head_input), x[:, :, -out_length:]
 
+    @property
+    def classic_exportable(self) -> bool:
+        cfg = self._config
+        return len(set(cfg["kernel_sizes"])) == 1 and cfg["head"]["kernel_size"] == 1
+
+    def export_config_classic(self) -> dict:
+        """Per-array config in the classic (v0.5.x) schema."""
+        cfg = self._config
+        assert self.classic_exportable
+        return {
+            "input_size": cfg["input_size"],
+            "condition_size": cfg["condition_size"],
+            "channels": cfg["channels"],
+            "head_size": cfg["head"]["out_channels"],
+            "kernel_size": cfg["kernel_sizes"][0],
+            "dilations": list(cfg["dilations"]),
+            "head_bias": cfg["head"]["bias"],
+            "activation": cfg["activation"],
+            "gated": False,
+        }
+
     def export_config(self) -> dict:
-        cfg = dict(self._config)
-        cfg["activation"] = "Tanh"
-        cfg["gated"] = False
-        return cfg
+        """Per-array config in the current schema, optional features all off."""
+        cfg = self._config
+        n = len(cfg["dilations"])
+        activation: dict = {"type": cfg["activation"]}
+        if cfg["activation"] == "LeakyReLU":
+            activation["negative_slope"] = 0.01
+        film_off = {"active": False, "shift": True, "groups": 1}
+        return {
+            "input_size": cfg["input_size"],
+            "condition_size": cfg["condition_size"],
+            "head": dict(cfg["head"]),
+            "channels": cfg["channels"],
+            "kernel_sizes": list(cfg["kernel_sizes"]),
+            "dilations": list(cfg["dilations"]),
+            "activation": [dict(activation) for _ in range(n)],
+            "bottleneck": cfg["channels"],
+            "head1x1": {"active": False, "out_channels": 1, "groups": 1},
+            "layer1x1": {"active": True, "groups": 1},
+            "groups_input": 1,
+            "groups_input_mixin": 1,
+            **{key: dict(film_off) for key in _FILM_KEYS},
+            "gating_mode": ["none"] * n,
+            "secondary_activation": [None] * n,
+            "slimmable": None,
+        }
 
     def _weight_modules(self):
         mods = [self.rechannel]
@@ -159,10 +268,71 @@ def _conv_import(conv, weights: Sequence[float], i: int) -> int:
     return i
 
 
+def _activation_name(a) -> str:
+    """The activation's name from either the .nam form ({"type": ...}) or a string."""
+    if isinstance(a, dict):
+        if a.get("type") == "LeakyReLU" and a.get("negative_slope", 0.01) != 0.01:
+            raise NotImplementedError(
+                f"LeakyReLU negative_slope {a['negative_slope']} is not supported"
+            )
+        return a.get("type", a.get("name"))
+    return a
+
+
+def _layer_config_from_nam(lc: dict) -> dict:
+    """Normalize one .nam layer-array config (classic or current schema)."""
+    if lc.get("gated") or any(mode != "none" for mode in lc.get("gating_mode", [])):
+        raise NotImplementedError("gated WaveNet layers are not supported")
+
+    activation = lc.get("activation", "Tanh")
+    names = {_activation_name(a) for a in activation} if isinstance(activation, list) else {
+        _activation_name(activation)
+    }
+    if len(names) != 1:
+        raise NotImplementedError(f"per-layer activations are not supported: {sorted(names)}")
+    activation = names.pop()
+    if activation not in _ACTIVATIONS:
+        raise NotImplementedError(f"activation {activation!r} is not supported")
+
+    if "head" in lc:  # current schema (v0.6+)
+        unsupported = {
+            "head1x1": lc.get("head1x1", {}).get("active", False),
+            "disabled layer1x1": not lc.get("layer1x1", {}).get("active", True),
+            "FiLM": any(lc.get(key, {}).get("active", False) for key in _FILM_KEYS),
+            "bottleneck": lc.get("bottleneck", lc["channels"]) != lc["channels"],
+            "grouped convs": lc.get("groups_input", 1) != 1
+            or lc.get("groups_input_mixin", 1) != 1
+            or lc.get("layer1x1", {}).get("groups", 1) != 1,
+            "slimmable": lc.get("slimmable") is not None,
+        }
+        for feature, active in unsupported.items():
+            if active:
+                raise NotImplementedError(f"WaveNet with {feature} is not supported")
+        head = lc["head"]
+        kernel_sizes = lc["kernel_sizes"] if "kernel_sizes" in lc else lc["kernel_size"]
+    else:  # classic schema (v0.5.x)
+        head = {"out_channels": lc["head_size"], "kernel_size": 1, "bias": lc["head_bias"]}
+        kernel_sizes = lc["kernel_size"]
+
+    return {
+        "input_size": lc["input_size"],
+        "condition_size": lc["condition_size"],
+        "channels": lc["channels"],
+        "head": {
+            "out_channels": head["out_channels"],
+            "kernel_size": head["kernel_size"],
+            "bias": head["bias"],
+        },
+        "kernel_sizes": kernel_sizes,
+        "dilations": list(lc["dilations"]),
+        "activation": activation,
+    }
+
+
 class WaveNet:
     @classmethod
     def from_nam(cls, path: str) -> tuple["WaveNet", Optional[float]]:
-        """Load a classic-schema WaveNet .nam file; returns (model, sample_rate)."""
+        """Load a WaveNet .nam file (either schema); returns (model, sample_rate)."""
         with open(path) as fp:
             d = json.load(fp)
         if d.get("architecture") != "WaveNet":
@@ -170,24 +340,9 @@ class WaveNet:
         cfg = d["config"]
         if cfg.get("head") is not None:
             raise NotImplementedError("WaveNet with a head module is not supported")
-        layers_configs = []
-        for lc in cfg["layers"]:
-            if lc.get("activation") != "Tanh" or lc.get("gated"):
-                raise NotImplementedError(
-                    f"Only Tanh/non-gated layers supported, got {lc.get('activation')!r}"
-                    f"{' gated' if lc.get('gated') else ''}"
-                )
-            layers_configs.append(
-                {
-                    "input_size": lc["input_size"],
-                    "condition_size": lc["condition_size"],
-                    "channels": lc["channels"],
-                    "head_size": lc["head_size"],
-                    "kernel_size": lc["kernel_size"],
-                    "dilations": list(lc["dilations"]),
-                    "head_bias": lc["head_bias"],
-                }
-            )
+        if cfg.get("condition_dsp") is not None:
+            raise NotImplementedError("WaveNet with a condition DSP is not supported")
+        layers_configs = [_layer_config_from_nam(lc) for lc in cfg["layers"]]
         model = cls({"layers_configs": layers_configs, "head_scale": cfg["head_scale"]})
         model.import_weights(d["weights"])
         return model, d.get("sample_rate")
@@ -196,7 +351,7 @@ class WaveNet:
         # Building the model allocates tensors, so the backend has to be settled
         # by now; this is a no-op once anything has called device.select().
         ensure_selected()
-        config = config if config is not None else a1_config()
+        config = config if config is not None else a2_config()
         self.layer_arrays = [_LayerArray(**lc) for lc in config["layers_configs"]]
         self.head_scale = float(config["head_scale"])
         self._jits: dict[tuple[int, int], TinyJit] = {}
@@ -283,9 +438,17 @@ class WaveNet:
         i += 1
         assert i == len(weights), f"weight count mismatch: used {i} of {len(weights)}"
 
+    @property
+    def _classic_export(self) -> bool:
+        return all(la.classic_exportable for la in self.layer_arrays)
+
     def export_config(self) -> dict:
+        classic = self._classic_export
         return {
-            "layers": [la.export_config() for la in self.layer_arrays],
+            "layers": [
+                la.export_config_classic() if classic else la.export_config()
+                for la in self.layer_arrays
+            ],
             "head": None,
             "head_scale": self.head_scale,
         }
@@ -298,14 +461,15 @@ class WaveNet:
         weights: Optional[Sequence[float]] = None,
     ) -> None:
         """
-        Write a classic-schema .nam file.
+        Write a .nam file: the classic schema when the model fits it (so A1
+        models stay loadable everywhere), the current schema otherwise.
 
         :param weights: weights to write instead of the model's current ones,
             so a checkpoint can be saved without importing it back first.
         """
         t = datetime.now()
         model_dict = {
-            "version": _EXPORT_VERSION,
+            "version": _EXPORT_VERSION_CLASSIC if self._classic_export else _EXPORT_VERSION,
             "metadata": {
                 "date": {
                     "year": t.year,

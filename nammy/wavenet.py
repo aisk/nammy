@@ -170,6 +170,17 @@ class _LayerArray:
         layers = 1 + sum((layer.kernel_size - 1) * layer.dilation for layer in self.layers)
         return layers + self.head_kernel - 1
 
+    def sequence_lengths(self, length: int) -> list[int]:
+        """
+        The sequence length each layer sees for an input of `length`, and last
+        the head rechannel's. Every valid conv shortens what follows it.
+        """
+        lengths = []
+        for layer in self.layers:
+            lengths.append(length)
+            length -= (layer.kernel_size - 1) * layer.dilation
+        return lengths + [length]
+
     def __call__(
         self, x: Tensor, c: Tensor, head_input: Optional[Tensor] = None
     ) -> tuple[Tensor, Tensor]:
@@ -359,6 +370,14 @@ class WaveNet:
     @property
     def receptive_field(self) -> int:
         return 1 + sum(la.receptive_field - 1 for la in self.layer_arrays)
+
+    def sequence_lengths(self, length: int) -> list[int]:
+        """Every sequence length the network works at, for an input of `length`."""
+        lengths = []
+        for layer_array in self.layer_arrays:
+            lengths.extend(layer_array.sequence_lengths(length))
+            length -= layer_array.receptive_field - 1
+        return lengths
 
     def __call__(self, x: Tensor) -> Tensor:
         """

@@ -28,6 +28,52 @@ def esr(pred: np.ndarray, target: np.ndarray) -> float:
     return float(np.sum((pred - target) ** 2) / np.sum(target**2))
 
 
+def _split_divisor(length: int) -> int:
+    """
+    The factor tinygrad would split a reduce of `length` by, or 1 for none.
+
+    It tries divisors from 256 down to 8 and takes the first that fits
+    (tinygrad/schedule/rangeify.py), so a length whose factors all fall outside
+    that window cannot be split at all.
+    """
+    return next((d for d in range(256, 7, -1) if length % d == 0), 1)
+
+
+def tune_ny(model: WaveNet, ny: int) -> int:
+    """
+    Nudge ny so tinygrad can split the backward pass's long reduces.
+
+    The weight gradients reduce over the (batch x time) axis, thousands of
+    elements down to a handful, and tinygrad only spreads such a reduce over two
+    kernels when it can factor that axis (see _split_divisor). Every sequence
+    length in the network derives from the training window nx+ny-1, so a single
+    unlucky ny leaves all of them in one low-occupancy kernel each: A2's default
+    window, 6347 + 8192 - 1 = 14538 = 2*3*2423, factors into nothing usable and
+    costs 293 ms per step, against 64 ms at ny 8299 (RX 6800, OpenCL). A window
+    length is a slicing choice rather than a modelled quantity, so moving it by
+    1% is a free 4.6x.
+
+    Windows that already split are left alone: A1's 12284 is one, and the
+    nearby windows this would otherwise prefer all measured slower. The search
+    stays within 1.5% of the ny it was given, so it never costs a noticeable
+    number of windows on a short recording.
+    """
+
+    def score(candidate: int) -> tuple[int, int]:
+        length = model.receptive_field + candidate - 1
+        if _split_divisor(length) == 1:
+            return (0, 0)
+        # Among the candidates that split at all, the sum over the network's
+        # own sequence lengths ranks them well enough to land within 10% of the
+        # best one measured; it is not fine-grained enough to trust further.
+        return (sum(_split_divisor(n) for n in model.sequence_lengths(length)), -candidate)
+
+    if score(ny)[0]:
+        return ny
+    best = max(range(ny, ny + max(ny // 64, 8)), key=score)
+    return best if score(best)[0] else ny
+
+
 def train(
     model: WaveNet,
     x: np.ndarray,
@@ -60,6 +106,9 @@ def train(
     :param on_batch: called with (batches done, batches this epoch).
     """
     nx = model.receptive_field
+    if (tuned := tune_ny(model, ny)) != ny:
+        log(f"ny {ny} -> {tuned}, a window tinygrad can split the gradient reduces over")
+        ny = tuned
     n_val = max(int(len(x) * validation_fraction), nx + ny)
     x_train, y_train = x[:-n_val], y[:-n_val]
     x_val, y_val = x[-n_val:], y[-n_val:]

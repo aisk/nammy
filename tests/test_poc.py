@@ -247,8 +247,11 @@ def test_training_smoke():
 
     pred0 = model.process(x[-4800:])
     esr0 = esr(pred0, y[-4800:])
+    # 20 epochs, not the 5 that already clear the bar on a good day: five epochs
+    # is 25 Adam steps, and which windows those steps see moves the ESR between
+    # 0.09 and 0.82 as ny changes by a percent. By 20 every ny lands near 0.004.
     history = train(
-        model, x, y, epochs=5, batch_size=8, ny=1024, lr=0.004, validation_fraction=0.1, seed=0
+        model, x, y, epochs=20, batch_size=8, ny=1024, lr=0.004, validation_fraction=0.1, seed=0
     )
     assert history["best_esr"] < esr0, (history["best_esr"], esr0)
     assert history["best_esr"] < 0.5, history["best_esr"]

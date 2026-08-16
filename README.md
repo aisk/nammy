@@ -87,4 +87,6 @@ interpreter under Ransomware protection silences it.
   [PERFORMANCE.md](PERFORMANCE.md) has the numbers and where the time goes.
 - [DESIGN.md](DESIGN.md) covers why the backend is probed, why the GUI uses a
   single worker thread, and how the zipapp build works.
+- [PACKAGING.md](PACKAGING.md) covers the Microsoft Store build, which is an
+  MSIX with an interpreter inside it rather than a zipapp.
 - Tests: `uv run tests/test_poc.py` and `uv run tests/test_no_numpy.py`.

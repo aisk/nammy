@@ -5,5 +5,8 @@ __pycache__/
 *.wav
 data/
 dist/
+build/
+packaging/assets/
+packaging/nammy.ico
 *.egg-info/
 .pytest_cache/

@@ -22,3 +22,7 @@ dev = [
     "pydantic>=2.13.4",
     "torch>=2.13.0",
 ]
+# Only tools/build_msix.py needs this, and only on Windows.
+packaging = [
+    "pyinstaller>=6.11",
+]

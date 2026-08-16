@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The MSIX manifest. tools/build_msix.py copies this into the package layout,
+  stamping Version from pyproject.toml and, for a Store build, the Identity that
+  Partner Center assigns. The values below are what a local test build uses.
+
+  Windows.FullTrustApplication is the desktop bridge: the app runs as an
+  ordinary Win32 process, which is what tinygrad's JIT needs, since it allocates
+  executable memory and, on the GPU backends, loads the vendor OpenCL ICD out of
+  the system. runFullTrust is the capability that goes with it, and it is why
+  the submission has to declare why the app needs it.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="AnLong.nammy"
+    Publisher="CN=An Long"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>nammy</DisplayName>
+    <PublisherDisplayName>An Long</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- 1809 is the oldest Windows that installs an MSIX without a preview
+         runtime; nothing here needs anything newer. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="nammy" Executable="app\nammy.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="nammy"
+        Description="Train Neural Amp Modeler WaveNet models from a DI and reamp pair, and run audio back through them."
+        BackgroundColor="#171C26"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

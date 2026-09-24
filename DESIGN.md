@@ -15,6 +15,21 @@ machine code in-process and needs nothing installed, is in the chain behind it.
 An explicit `--device` is never probed away: if it cannot run, that is an error
 rather than a silent fall back to something an order of magnitude slower.
 
+## Several GPUs
+
+tinygrad's OpenCL backend only asks the first OpenCL platform for devices. An
+Intel iGPU and an NVIDIA card are two platforms, so whichever driver the ICD
+loader happens to list first is all tinygrad sees, and the card may be
+unreachable. nammy therefore collects the GPUs of every platform, puts the ones
+that do not share memory with the host first, and installs that list as
+tinygrad's before any CL device is opened. Microsoft's OpenCLOn12 platform
+lists the same adapters again through D3D12, so it is only used when no native
+driver offers a GPU.
+
+tinygrad's `DEV` reads `CL:1` as the CL device with a renderer called `1`, so
+nammy sets an indexed target as a `Target` whose device name carries the index,
+which tinygrad takes as `Device.DEFAULT` as is.
+
 ## The GUI's single worker thread
 
 Work runs on one background thread, and it has to be exactly one: tinygrad

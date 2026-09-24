@@ -19,7 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .data import load_pair, read_wav, write_wav
-from .device import preference, probe, select
+from .device import describe, preference, probe, select
 from .train import train
 from .wavenet import ARCHITECTURES, WaveNet
 
@@ -183,9 +183,15 @@ class DeviceBar(ttk.Frame):
         self._targets = list(preference())
         if initial and initial not in self._targets:
             self._targets.insert(0, initial)
-        self.var = tk.StringVar(value=initial or self._targets[0])
+        # With several GPUs "CL" and "CL:1" say nothing, so the list shows names.
+        self._labels = {_label(t): t for t in self._targets}
+        self.var = tk.StringVar(value=_label(initial or self._targets[0]))
         self.box = ttk.Combobox(
-            self, textvariable=self.var, values=self._targets, state="disabled", width=12
+            self,
+            textvariable=self.var,
+            values=list(self._labels),
+            state="disabled",
+            width=max(12, *map(len, self._labels)),
         )
         self.box.grid(row=0, column=1, padx=6)
         self.box.bind("<<ComboboxSelected>>", lambda _e: self._show_note())
@@ -198,7 +204,7 @@ class DeviceBar(ttk.Frame):
 
     @property
     def target(self) -> str:
-        return self.var.get()
+        return self._labels[self.var.get()]
 
     def set_enabled(self, enabled: bool) -> None:
         state = "readonly" if enabled and self.ready else "disabled"
@@ -220,17 +226,22 @@ class DeviceBar(ttk.Frame):
         if not self._wanted:
             working = [t for t, err in self._results.items() if err is None]
             if working:
-                self.var.set(working[0])
+                self.var.set(_label(working[0]))
         self.ready = True
         self.box.configure(state="readonly")
         self._show_note()
 
     def _show_note(self) -> None:
-        error = self._results.get(self.var.get())
+        error = self._results.get(self.target)
         if error is None:
             self.note.configure(text="", foreground="#606060")
         else:
             self.note.configure(text=f"unavailable — {error}", foreground="#b00000")
+
+
+def _label(target: str) -> str:
+    name = describe(target)
+    return f"{target} · {name}" if name else target
 
 
 class _JobTab(ttk.Frame):
@@ -264,7 +275,7 @@ class _JobTab(ttk.Frame):
     def use_device(self) -> str:
         """Settle the backend on the engine thread; raises DeviceError if it cannot."""
         target = select(self._target)
-        self.post("log", f"device: {target}")
+        self.post("log", f"device: {_label(target)}")
         return target
 
     def request_stop(self) -> None:

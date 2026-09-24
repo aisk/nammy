@@ -10,17 +10,28 @@ Usage:
 import argparse
 
 from nammy.data import load_pair, read_wav, write_wav
-from nammy.device import DeviceError, preference, select
+from nammy.device import DeviceError, describe, preference, probe, select
 from nammy.train import train
 from nammy.wavenet import ARCHITECTURES, WaveNet
+
+
+def labelled(target):
+    name = describe(target)
+    return f"{target} ({name})" if name else target
 
 
 def use_device(args):
     """Settle the backend before any tensor work, and say which one won."""
     try:
-        print(f"device: {select(args.device)}")
+        print(f"device: {labelled(select(args.device))}")
     except DeviceError as exc:
         raise SystemExit(f"error: {exc}")
+
+
+def cmd_devices(args):
+    for target in preference():
+        error = probe(target)
+        print(f"{labelled(target):<40} {'ok' if error is None else error}")
 
 
 def cmd_train(args):
@@ -76,7 +87,8 @@ def main():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--device",
-        help="tinygrad backend to run on, e.g. CL, METAL, CPU:X86. An unusable "
+        help="tinygrad backend to run on, e.g. CL, CL:1 (the second GPU, see "
+        "the devices command), METAL, CPU:X86. An unusable "
         "one is an error; without this, the first of "
         f"{', '.join(preference())} that works is used.",
     )
@@ -111,6 +123,9 @@ def main():
 
     p_gui = sub.add_parser("gui", parents=[common], help="Open the Tkinter GUI")
     p_gui.set_defaults(func=cmd_gui)
+
+    p_dev = sub.add_parser("devices", help="List the devices --device accepts, best first")
+    p_dev.set_defaults(func=cmd_devices)
 
     args = parser.parse_args()
     args.func(args)

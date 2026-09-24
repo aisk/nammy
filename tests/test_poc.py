@@ -202,6 +202,10 @@ def test_device_selection():
     except device.DeviceError as exc:
         assert "not usable" in str(exc), exc
 
+    # A GPU index past the last one says so, rather than failing inside tinygrad.
+    if device.describe("CL") is not None:
+        assert "no such GPU" in device.probe("CL:99"), device.probe("CL:99")
+
     target = device.select()
     assert device.current() == target
     assert Device.DEFAULT == target.split(":")[0], (Device.DEFAULT, target)

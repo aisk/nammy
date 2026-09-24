@@ -10,12 +10,22 @@ quiet fall back to something an order of magnitude slower.
 Opening a device says little about whether it works: tinygrad's CPU device
 JIT-compiles with clang and opens fine without it, failing only later when the
 first kernel is compiled. So a probe has to actually run something.
+
+A machine can have more than one GPU, typically an integrated one next to a
+discrete one, and tinygrad's OpenCL backend only looks at the first OpenCL
+platform: with an Intel iGPU and an NVIDIA card, which are separate platforms,
+the card may not be reachable at all. So nammy lists the GPUs of every platform
+itself, discrete ones first, and hands tinygrad that list. "CL" is the first of
+them, "CL:1" the second and so on.
 """
 
 from __future__ import annotations
 
+import ctypes
+import functools
 import os
 import platform
+import re
 import shutil
 import sys
 
@@ -41,10 +51,101 @@ def cpu_targets() -> list[str]:
     return (["CPU"] if shutil.which("clang") else []) + [fallback]
 
 
+@functools.cache
+def _cl_gpus() -> tuple[str, ...]:
+    """
+    Names of the OpenCL GPUs, in the order nammy numbers them, and tinygrad told
+    to use that order.
+
+    Discrete GPUs come first, told apart by not sharing memory with the host.
+    Microsoft's OpenCLOn12 exposes every D3D12 adapter again as a translation
+    layer, so its devices are only used when no native driver offers a GPU.
+    Empty when there is no OpenCL at all, or when tinygrad has already opened a
+    CL device and fixed its own list; either way tinygrad is left to itself.
+    """
+    try:
+        from tinygrad.runtime.autogen import opencl as cl
+        from tinygrad.runtime.ops_cl import CLDevice
+    except Exception:
+        return ()
+    if CLDevice.device_ids is not None:
+        return ()
+
+    def text(get, handle, param) -> str:
+        buf = ctypes.create_string_buffer(256)
+        get(handle, param, len(buf), buf, None)
+        return buf.value.decode(errors="replace").strip()
+
+    count = ctypes.c_uint32()
+    if cl.clGetPlatformIDs(0, None, ctypes.byref(count)) != 0 or not count.value:
+        return ()
+    platforms = (cl.cl_platform_id * count.value)()
+    cl.clGetPlatformIDs(count.value, platforms, None)
+
+    native, layered = [], []
+    for plat in platforms:
+        found = ctypes.c_uint32()
+        if cl.clGetDeviceIDs(plat, cl.CL_DEVICE_TYPE_GPU, 0, None, ctypes.byref(found)) != 0:
+            continue  # CL_DEVICE_NOT_FOUND: a CPU-only platform
+        ids = (cl.cl_device_id * found.value)()
+        cl.clGetDeviceIDs(plat, cl.CL_DEVICE_TYPE_GPU, found.value, ids, None)
+        platform_name = text(cl.clGetPlatformInfo, plat, cl.CL_PLATFORM_NAME)
+        (layered if "OpenCLOn12" in platform_name else native).extend(ids)
+    gpus = native or layered
+    if not gpus:
+        return ()
+
+    def integrated(dev) -> bool:
+        flag = ctypes.c_uint32()
+        cl.clGetDeviceInfo(dev, cl.CL_DEVICE_HOST_UNIFIED_MEMORY, 4, ctypes.byref(flag), None)
+        return bool(flag.value)
+
+    gpus.sort(key=integrated)  # stable, so each driver's own order survives
+    CLDevice.device_ids = (cl.cl_device_id * len(gpus))(*gpus)
+    return tuple(text(cl.clGetDeviceInfo, dev, cl.CL_DEVICE_NAME) for dev in gpus)
+
+
+def cl_targets() -> list[str]:
+    """One CL target per GPU, best first; just "CL" when there is at most one."""
+    return ["CL"] + [f"CL:{i}" for i in range(1, len(_cl_gpus()))]
+
+
+def describe(target: str) -> str | None:
+    """The hardware behind a target, where nammy knows it (OpenCL GPUs only)."""
+    base, index = _split_index(target)
+    names = _cl_gpus()
+    if base.upper() == "CL" and index < len(names):
+        return names[index]
+    return None
+
+
 def preference() -> tuple[str, ...]:
     """The chain tried when no device is asked for, best first."""
-    accelerators = ["METAL", "CL"] if sys.platform == "darwin" else ["CL"]
+    accelerators = (["METAL"] if sys.platform == "darwin" else []) + cl_targets()
     return tuple(accelerators + cpu_targets())
+
+
+def _split_index(target: str) -> tuple[str, int]:
+    """"CL:1" -> ("CL", 1); anything without a numeric suffix has index 0."""
+    if m := re.fullmatch(r"([A-Za-z]+):(\d+)", target):
+        return m[1], int(m[2])
+    return target, 0
+
+
+def _dev_value(target: str):
+    """
+    What DEV has to be set to for target.
+
+    DEV reads "CL:1" as the CL device with a renderer called "1", so an indexed
+    device has to be given as a Target whose device name carries the index; that
+    becomes Device.DEFAULT as is, and tinygrad opens that device.
+    """
+    from tinygrad.helpers import Target
+
+    base, index = _split_index(target)
+    if base == target:
+        return target
+    return base.upper() if index == 0 else Target(device=f"{base.upper()}:{index}")
 
 
 def probe(target: str) -> str | None:
@@ -53,9 +154,14 @@ def probe(target: str) -> str | None:
     from tinygrad.device import ALL_DEVICES, Device
     from tinygrad.helpers import DEV
 
+    # Before anything opens CL, or tinygrad keeps its own device list.
+    gpus = _cl_gpus()
+    base, index = _split_index(target)
+    if base.upper() == "CL" and gpus and index >= len(gpus):
+        return f"no such GPU; OpenCL has {len(gpus)}: " + ", ".join(cl_targets())
     previous = DEV.value
     try:
-        DEV.value = target
+        DEV.value = _dev_value(target)
         Device[DEV.device]
         (Tensor([1.0, 2.0, 3.0]) * 2).tolist()
         return None
@@ -104,7 +210,7 @@ def _activate(target: str) -> str:
     global _selected
     from tinygrad.helpers import DEV
 
-    DEV.value = target
+    DEV.value = _dev_value(target)
     _tune_for(target)
     _selected = target
     return target

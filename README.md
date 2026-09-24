@@ -50,6 +50,9 @@ chosen explicitly with `--device`, accepted by every command:
 $ uv run python -m nammy train input.wav output.wav --device CL
 ```
 
+With more than one GPU, discrete cards come first: `CL` is the best one, `CL:1`
+the next, and so on. `nammy devices` lists them by name and says which work.
+
 ### GUI
 
 A small Tkinter front end over the same two commands:

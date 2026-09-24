@@ -60,8 +60,9 @@ def _cl_gpus() -> tuple[str, ...]:
     Discrete GPUs come first, told apart by not sharing memory with the host.
     Microsoft's OpenCLOn12 exposes every D3D12 adapter again as a translation
     layer, so its devices are only used when no native driver offers a GPU.
-    Empty when there is no OpenCL at all, or when tinygrad has already opened a
-    CL device and fixed its own list; either way tinygrad is left to itself.
+    Empty when there is no OpenCL library or platform at all, or when tinygrad
+    has already opened a CL device and fixed its own list; either way tinygrad is
+    left to itself.
     """
     try:
         from tinygrad.runtime.autogen import opencl as cl
@@ -77,7 +78,10 @@ def _cl_gpus() -> tuple[str, ...]:
         return buf.value.decode(errors="replace").strip()
 
     count = ctypes.c_uint32()
-    if cl.clGetPlatformIDs(0, None, ctypes.byref(count)) != 0 or not count.value:
+    try:
+        if cl.clGetPlatformIDs(0, None, ctypes.byref(count)) != 0 or not count.value:
+            return ()
+    except AttributeError:  # the binding loads its library lazily; there is none
         return ()
     platforms = (cl.cl_platform_id * count.value)()
     cl.clGetPlatformIDs(count.value, platforms, None)
